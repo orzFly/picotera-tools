@@ -14,6 +14,9 @@ type Rules struct {
 	// Blacklist paths (canonical) never seed a project and never match as an
 	// ancestor; a project path equal to the workspace still matches.
 	Blacklist map[string]bool
+	// Roots are canonical directories whose subdirectories belong to them,
+	// for repositories whose first request came from a subdirectory.
+	Roots []string
 }
 
 type Alias struct {
@@ -94,10 +97,16 @@ func (r *Rules) Canonical(p string) string {
 		}
 		rest := strings.TrimLeft(root[loc[1]:], `\/`)
 		rest = strings.ReplaceAll(rest, `\`, "/")
-		if rest == "" {
-			return a.To
+		root = a.To
+		if rest != "" {
+			root += "/" + rest
 		}
-		return a.To + "/" + rest
+		break
+	}
+	for _, r := range r.Roots {
+		if root == r || strings.HasPrefix(root, r+"/") || strings.HasPrefix(root, r+`\`) {
+			return r
+		}
 	}
 	return root
 }

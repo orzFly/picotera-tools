@@ -176,3 +176,16 @@ func TestPlanMergesNoopAndNoParentFolding(t *testing.T) {
 		t.Fatalf("got %+v", plans)
 	}
 }
+
+func TestRootsFoldSubdirectories(t *testing.T) {
+	p := testProjects(nil)
+	p.Rules.Roots = []string{"/home/alice/src/hotel"}
+	r, _ := p.Resolve(context.Background(), cc("/home/alice/src/hotel/backend"))
+	if r == nil || r.Name != "hotel" || r.Source != "/home/alice/src/hotel" {
+		t.Fatalf("got %+v", r)
+	}
+	again, _ := p.Resolve(context.Background(), cc("/home/alice/src/hotel"))
+	if again == nil || again.ID != r.ID {
+		t.Fatalf("got %+v, want the same project", again)
+	}
+}

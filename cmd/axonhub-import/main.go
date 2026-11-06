@@ -74,6 +74,7 @@ func main() {
 
 type common struct {
 	assign  assignFlag
+	roots   rootsFlag
 	userID  int64
 	afterID int64
 	untilID int64
@@ -87,6 +88,7 @@ func (c *common) register(fs *flag.FlagSet) {
 	fs.Int64Var(&c.untilID, "until-id", 0, "stop at this AxonHub request id, inclusive (0 = current max)")
 	fs.IntVar(&c.batch, "batch", 100, "AxonHub requests per query")
 	fs.IntVar(&c.workers, "workers", 8, "concurrent mapping/upload workers")
+	fs.Var(&c.roots, "root", "PATH: workspaces under PATH belong to the project at PATH (repeatable)")
 	fs.Var(&c.assign, "assign", "PATH=PROJECT_ID: put workspaces at or under PATH into that project without adding the path (repeatable)")
 }
 
@@ -107,6 +109,19 @@ func (a *assignFlag) Set(v string) error {
 	}
 	(*a)[path] = int32(n)
 	return nil
+}
+
+type rootsFlag []string
+
+func (r *rootsFlag) String() string     { return strings.Join(*r, ",") }
+func (r *rootsFlag) Set(v string) error { *r = append(*r, v); return nil }
+
+func (c *common) rules() *axonimport.Rules {
+	rules := axonimport.DefaultRules()
+	for _, r := range c.roots {
+		rules.Roots = append(rules.Roots, rules.Canonical(r))
+	}
+	return rules
 }
 
 func (c *common) applyAssign(p *axonimport.Projects) {
@@ -135,7 +150,7 @@ func cmdProjects(ctx context.Context, args []string) error {
 	}
 	// Auto-creation is simulated in memory so the report shows the names
 	// PicoTera would pick, including collision suffixes.
-	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, axonimport.ProjectsAutoCreate, axonimport.DefaultRules())
+	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, axonimport.ProjectsAutoCreate, c.rules())
 	if err != nil {
 		return err
 	}
@@ -189,7 +204,7 @@ func cmdImport(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, mode, axonimport.DefaultRules())
+	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, mode, c.rules())
 	if err != nil {
 		return err
 	}

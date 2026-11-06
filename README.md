@@ -40,3 +40,11 @@ ssh host /srv/picotera-tools/run.sh projects
 ```
 
 `run.sh` is `podman run --network internal --env-file …/axonhub-environment --env-file …/picotera-environment`. `--write` also needs the `PICOTERA_S3_*` variables that live inline in the picotera unit, not in its env file.
+
+### Deployment data
+
+`runs/import.args` holds the one-off routing decided for that import (`--assign` to existing projects, `--root` for repositories whose first request came from a subdirectory). Pass it to `projects` and `import` alike:
+
+```sh
+ssh host 'cd /srv/picotera-tools && ./run.sh import $(cat import.args) --projects autocreate'
+```
