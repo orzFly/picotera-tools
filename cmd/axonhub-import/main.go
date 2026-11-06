@@ -275,7 +275,7 @@ func cmdReproject(ctx context.Context, args []string) error {
 		return err
 	}
 	since := time.Now().AddDate(0, 0, -40)
-	return axonimport.RefreshProjects(ctx, pico, rp.TouchedProjects(), since)
+	return axonimport.RefreshProjects(ctx, pico, rp.ProjectID, rp.TargetProjects(), since)
 }
 
 func resolveUntil(ctx context.Context, src *axonimport.Source, c *common) error {

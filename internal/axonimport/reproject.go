@@ -162,16 +162,30 @@ func (rp *Reproject) requestBody(ctx context.Context, dec *zstd.Decoder, id stri
 	return []byte(p.Body), nil
 }
 
-// RefreshProjects recomputes first/last seen for the given projects from
-// their meta rows, then refreshes the continuous aggregates from since.
-func RefreshProjects(ctx context.Context, db *pgxpool.Pool, ids []int32, since time.Time) error {
+// RefreshProjects fixes first/last seen after rows moved from source to
+// targets, then refreshes the continuous aggregates from since. Targets only
+// widen: their stored range may predate their current rows (merged
+// projects). The source shrinks to what is left, or NULL when emptied.
+func RefreshProjects(ctx context.Context, db *pgxpool.Pool, source int32, targets []int32, since time.Time) error {
 	_, err := db.Exec(ctx, `
-		UPDATE project p SET first_seen_at = s.first, last_seen_at = s.last, updated_at = now()
+		UPDATE project p
+		SET first_seen_at = LEAST(COALESCE(p.first_seen_at, s.first), s.first),
+		    last_seen_at  = GREATEST(COALESCE(p.last_seen_at, s.last), s.last),
+		    updated_at    = now()
 		FROM (SELECT project_id, min(created_at) AS first, max(created_at) AS last
 		      FROM request WHERE type = 0 AND project_id = ANY($1) GROUP BY project_id) s
-		WHERE p.id = s.project_id`, ids)
+		WHERE p.id = s.project_id`, targets)
 	if err != nil {
-		return fmt.Errorf("update project seen: %w", err)
+		return fmt.Errorf("update target project seen: %w", err)
+	}
+	_, err = db.Exec(ctx, `
+		UPDATE project p
+		SET first_seen_at = (SELECT min(created_at) FROM request WHERE type = 0 AND project_id = p.id),
+		    last_seen_at  = (SELECT max(created_at) FROM request WHERE type = 0 AND project_id = p.id),
+		    updated_at    = now()
+		WHERE p.id = $1`, source)
+	if err != nil {
+		return fmt.Errorf("update source project seen: %w", err)
 	}
 	for _, view := range []string{"request_overview_bucketed", "request_outcome_bucketed"} {
 		if _, err := db.Exec(ctx, `CALL refresh_continuous_aggregate($1::regclass, $2::timestamp, NULL)`, view, since); err != nil {
@@ -181,10 +195,9 @@ func RefreshProjects(ctx context.Context, db *pgxpool.Pool, ids []int32, since t
 	return nil
 }
 
-// TouchedProjects lists the projects a reproject run moved rows into, plus
-// the source project.
-func (rp *Reproject) TouchedProjects() []int32 {
-	ids := []int32{rp.ProjectID}
+// TargetProjects lists the projects a reproject run moved rows into.
+func (rp *Reproject) TargetProjects() []int32 {
+	var ids []int32
 	for _, e := range rp.Report.entries {
 		if e.id > 0 && e.id != rp.ProjectID {
 			ids = append(ids, e.id)
