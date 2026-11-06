@@ -188,10 +188,11 @@ type BodyRow struct {
 
 // Bodies pages through client request bodies only, for the project report,
 // which has no use for the far larger response columns.
-func (s *Source) Bodies(ctx context.Context, afterID, untilID int64, limit int) ([]BodyRow, error) {
+func (s *Source) Bodies(ctx context.Context, afterID, untilID int64, limit int, sampleMod int64) ([]BodyRow, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT id, created_at, request_body FROM requests
-		WHERE id > $1 AND id <= $2 ORDER BY id LIMIT $3`, afterID, untilID, limit)
+		WHERE id > $1 AND id <= $2 AND ($4::bigint = 0 OR id % $4::bigint = 0)
+		ORDER BY id LIMIT $3`, afterID, untilID, limit, sampleMod)
 	if err != nil {
 		return nil, fmt.Errorf("query bodies: %w", err)
 	}

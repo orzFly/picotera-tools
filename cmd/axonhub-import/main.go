@@ -98,6 +98,7 @@ func cmdProjects(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("projects", flag.ExitOnError)
 	var c common
 	c.register(fs)
+	sampleMod := fs.Int64("sample-mod", 0, "only requests whose id is divisible by this")
 	_ = fs.Parse(args)
 
 	axon, pico, err := connect(ctx, false)
@@ -117,7 +118,7 @@ func cmdProjects(ctx context.Context, args []string) error {
 		return err
 	}
 	c.applyExactOnly(projects)
-	rep, err := axonimport.RunProjectReport(ctx, src, projects, c.afterID, c.untilID, c.batch, c.workers)
+	rep, err := axonimport.RunProjectReport(ctx, src, projects, c.afterID, c.untilID, c.batch, c.workers, *sampleMod)
 	if err != nil {
 		return err
 	}

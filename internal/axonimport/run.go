@@ -152,13 +152,13 @@ type reportEntry struct {
 	first, last time.Time
 }
 
-func RunProjectReport(ctx context.Context, src *Source, projects *Projects, afterID, untilID int64, batch, workers int) (*ProjectReport, error) {
+func RunProjectReport(ctx context.Context, src *Source, projects *Projects, afterID, untilID int64, batch, workers int, sampleMod int64) (*ProjectReport, error) {
 	rep := &ProjectReport{entries: map[string]*reportEntry{}}
 	after := afterID
 	var total int64
 	start := time.Now()
 	for {
-		rows, err := src.Bodies(ctx, after, untilID, batch)
+		rows, err := src.Bodies(ctx, after, untilID, batch, sampleMod)
 		if err != nil {
 			return nil, err
 		}
