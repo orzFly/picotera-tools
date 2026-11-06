@@ -33,6 +33,9 @@ commands:
   finalize   upsert traces, project first/last seen, refresh aggregates (needs --write)
   reproject  re-resolve the project of rows in one PicoTera project from their
              request artifacts; dry-run unless --write
+  merge-projects
+             fold worktree and other-machine fragments into the repository's
+             project; prints the plan unless --write
 
 environment:
   AXONHUB_DB_DSN, PICOTERA_DATABASE_URL,
@@ -58,6 +61,8 @@ func main() {
 		err = cmdFinalize(ctx, os.Args[2:])
 	case "reproject":
 		err = cmdReproject(ctx, os.Args[2:])
+	case "merge-projects":
+		err = cmdMergeProjects(ctx, os.Args[2:])
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -68,12 +73,12 @@ func main() {
 }
 
 type common struct {
-	exactOnly string
-	userID    int64
-	afterID   int64
-	untilID   int64
-	batch     int
-	workers   int
+	assign  assignFlag
+	userID  int64
+	afterID int64
+	untilID int64
+	batch   int
+	workers int
 }
 
 func (c *common) register(fs *flag.FlagSet) {
@@ -82,15 +87,32 @@ func (c *common) register(fs *flag.FlagSet) {
 	fs.Int64Var(&c.untilID, "until-id", 0, "stop at this AxonHub request id, inclusive (0 = current max)")
 	fs.IntVar(&c.batch, "batch", 100, "AxonHub requests per query")
 	fs.IntVar(&c.workers, "workers", 8, "concurrent mapping/upload workers")
-	fs.StringVar(&c.exactOnly, "exact-only", "/home/alice", "comma-separated project paths that only match exactly, never as an ancestor")
+	fs.Var(&c.assign, "assign", "PATH=PROJECT_ID: put workspaces at or under PATH into that project without adding the path (repeatable)")
 }
 
-func (c *common) applyExactOnly(p *axonimport.Projects) {
-	p.ExactOnly = map[string]bool{}
-	for _, path := range strings.Split(c.exactOnly, ",") {
-		if path = strings.TrimSpace(path); path != "" {
-			p.ExactOnly[path] = true
-		}
+// assignFlag collects --assign PATH=PROJECT_ID; paths are canonicalized
+// when applied.
+type assignFlag map[string]int32
+
+func (a *assignFlag) String() string { return fmt.Sprint(map[string]int32(*a)) }
+
+func (a *assignFlag) Set(v string) error {
+	path, id, ok := strings.Cut(v, "=")
+	n, err := strconv.ParseInt(id, 10, 32)
+	if !ok || path == "" || err != nil || n <= 0 {
+		return fmt.Errorf("want PATH=PROJECT_ID, got %q", v)
+	}
+	if *a == nil {
+		*a = assignFlag{}
+	}
+	(*a)[path] = int32(n)
+	return nil
+}
+
+func (c *common) applyAssign(p *axonimport.Projects) {
+	p.Assign = map[string]int32{}
+	for path, id := range c.assign {
+		p.Assign[p.Rules.Canonical(path)] = id
 	}
 }
 
@@ -113,11 +135,11 @@ func cmdProjects(ctx context.Context, args []string) error {
 	}
 	// Auto-creation is simulated in memory so the report shows the names
 	// PicoTera would pick, including collision suffixes.
-	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, axonimport.ProjectsAutoCreate)
+	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, axonimport.ProjectsAutoCreate, axonimport.DefaultRules())
 	if err != nil {
 		return err
 	}
-	c.applyExactOnly(projects)
+	c.applyAssign(projects)
 	rep, err := axonimport.RunProjectReport(ctx, src, projects, c.afterID, c.untilID, c.batch, c.workers, *sampleMod)
 	if err != nil {
 		return err
@@ -167,11 +189,11 @@ func cmdImport(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, mode)
+	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, mode, axonimport.DefaultRules())
 	if err != nil {
 		return err
 	}
-	c.applyExactOnly(projects)
+	c.applyAssign(projects)
 
 	var target axonimport.Target
 	if *write {
@@ -246,19 +268,19 @@ func cmdReproject(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	projects, err := axonimport.LoadProjects(ctx, pico, *userID, axonimport.ProjectsAutoCreate)
-	if err != nil {
-		return err
-	}
+	rules := axonimport.DefaultRules()
 	// The source project's own paths are what swallowed everything below
 	// them, so they may only match exactly from now on.
 	var srcPaths []string
 	if err := pico.QueryRow(ctx, `SELECT paths FROM project WHERE id = $1 AND user_id = $2`, *projectID, *userID).Scan(&srcPaths); err != nil {
 		return fmt.Errorf("load project %d: %w", *projectID, err)
 	}
-	projects.ExactOnly = map[string]bool{}
 	for _, p := range srcPaths {
-		projects.ExactOnly[p] = true
+		rules.Blacklist[rules.Canonical(p)] = true
+	}
+	projects, err := axonimport.LoadProjects(ctx, pico, *userID, axonimport.ProjectsAutoCreate, rules)
+	if err != nil {
+		return err
 	}
 	if *write {
 		projects.DB = pico
@@ -277,6 +299,33 @@ func cmdReproject(ctx context.Context, args []string) error {
 	}
 	since := time.Now().AddDate(0, 0, -40)
 	return axonimport.RefreshProjects(ctx, pico, rp.ProjectID, rp.TargetProjects(), since)
+}
+
+func cmdMergeProjects(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("merge-projects", flag.ExitOnError)
+	userID := fs.Int64("user-id", 1, "PicoTera user whose projects are merged")
+	write := fs.Bool("write", false, "apply the plan; merges cannot be undone")
+	_ = fs.Parse(args)
+
+	pico, err := pool(ctx, "PICOTERA_DATABASE_URL", !*write)
+	if err != nil {
+		return err
+	}
+	defer pico.Close()
+	projects, err := axonimport.LoadMergeProjects(ctx, pico, *userID)
+	if err != nil {
+		return err
+	}
+	plans := axonimport.DefaultRules().PlanMerges(projects)
+	axonimport.ShowMergePlans(os.Stdout, plans)
+	if !*write {
+		if len(plans) > 0 {
+			os.Exit(1)
+		}
+		return nil
+	}
+	fmt.Println()
+	return axonimport.ApplyMergePlans(ctx, pico, *userID, plans, os.Stdout)
 }
 
 func resolveUntil(ctx context.Context, src *axonimport.Source, c *common) error {
