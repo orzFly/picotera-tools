@@ -82,15 +82,15 @@ func (s *Source) Channels(ctx context.Context) (map[int64]string, error) {
 // Batch returns up to limit requests with id in (afterID, untilID], fully
 // populated with executions, usage and trace id. Bodies are scanned as raw
 // jsonb text so they are never decoded into Go values.
-func (s *Source) Batch(ctx context.Context, afterID, untilID int64, limit int) ([]*Request, error) {
+func (s *Source) Batch(ctx context.Context, afterID, untilID int64, limit int, sampleMod int64) ([]*Request, error) {
 	rows, err := s.pool.Query(ctx, `
 		SELECT r.id, r.created_at, r.model_id, r.format, r.stream, r.status,
 		       r.request_headers, r.request_body, r.response_body,
 		       r.metrics_latency_ms, r.metrics_first_token_latency_ms, r.channel_id, t.trace_id
 		FROM requests r LEFT JOIN traces t ON t.id = r.trace_id
-		WHERE r.id > $1 AND r.id <= $2
+		WHERE r.id > $1 AND r.id <= $2 AND ($4::bigint = 0 OR r.id % $4::bigint = 0)
 		ORDER BY r.id
-		LIMIT $3`, afterID, untilID, limit)
+		LIMIT $3`, afterID, untilID, limit, sampleMod)
 	if err != nil {
 		return nil, fmt.Errorf("query requests: %w", err)
 	}

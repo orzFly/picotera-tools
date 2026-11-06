@@ -31,6 +31,10 @@ type Projects struct {
 	Mode   ProjectMode
 	UserID int64
 	DB     *pgxpool.Pool // nil in dry-run; auto-creation is then only simulated
+	// ExactOnly paths match only a workspace path equal to them, never as an
+	// ancestor. PicoTera auto-created a project for /home/alice once, and
+	// ancestor matching then swallowed every repo under it.
+	ExactOnly map[string]bool
 
 	mu     sync.Mutex
 	byPath map[string]projectPath
@@ -107,7 +111,7 @@ func (p *Projects) match(paths []string) *Resolution {
 	for _, path := range paths {
 		for _, a := range picotera.AncestorPaths(path) {
 			pp, ok := p.byPath[a]
-			if !ok {
+			if !ok || (a != path && p.ExactOnly[a]) {
 				continue
 			}
 			if len(a) > bestLen || (len(a) == bestLen && pp.id < best.ID) {

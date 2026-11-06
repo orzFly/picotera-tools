@@ -14,6 +14,7 @@ import (
 	"os"
 	"os/signal"
 	"strconv"
+	"strings"
 	"syscall"
 	"time"
 
@@ -30,6 +31,8 @@ commands:
   projects   report which PicoTera project each request would land in (read-only)
   import     map requests and dump them (default) or write them with --write
   finalize   upsert traces, project first/last seen, refresh aggregates (needs --write)
+  reproject  re-resolve the project of rows in one PicoTera project from their
+             request artifacts; dry-run unless --write
 
 environment:
   AXONHUB_DB_DSN, PICOTERA_DATABASE_URL,
@@ -53,6 +56,8 @@ func main() {
 		err = cmdImport(ctx, os.Args[2:])
 	case "finalize":
 		err = cmdFinalize(ctx, os.Args[2:])
+	case "reproject":
+		err = cmdReproject(ctx, os.Args[2:])
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -63,11 +68,12 @@ func main() {
 }
 
 type common struct {
-	userID  int64
-	afterID int64
-	untilID int64
-	batch   int
-	workers int
+	exactOnly string
+	userID    int64
+	afterID   int64
+	untilID   int64
+	batch     int
+	workers   int
 }
 
 func (c *common) register(fs *flag.FlagSet) {
@@ -76,6 +82,16 @@ func (c *common) register(fs *flag.FlagSet) {
 	fs.Int64Var(&c.untilID, "until-id", 0, "stop at this AxonHub request id, inclusive (0 = current max)")
 	fs.IntVar(&c.batch, "batch", 100, "AxonHub requests per query")
 	fs.IntVar(&c.workers, "workers", 8, "concurrent mapping/upload workers")
+	fs.StringVar(&c.exactOnly, "exact-only", "/home/alice", "comma-separated project paths that only match exactly, never as an ancestor")
+}
+
+func (c *common) applyExactOnly(p *axonimport.Projects) {
+	p.ExactOnly = map[string]bool{}
+	for _, path := range strings.Split(c.exactOnly, ",") {
+		if path = strings.TrimSpace(path); path != "" {
+			p.ExactOnly[path] = true
+		}
+	}
 }
 
 func cmdProjects(ctx context.Context, args []string) error {
@@ -100,6 +116,7 @@ func cmdProjects(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	c.applyExactOnly(projects)
 	rep, err := axonimport.RunProjectReport(ctx, src, projects, c.afterID, c.untilID, c.batch, c.workers)
 	if err != nil {
 		return err
@@ -116,11 +133,15 @@ func cmdImport(ctx context.Context, args []string) error {
 	dump := fs.String("dump", "", "dry-run: write decompressed artifacts and rows.jsonl here (empty = count only)")
 	write := fs.Bool("write", false, "write to the live PicoTera database and bucket")
 	projectMode := fs.String("projects", "match", "project resolution: off, match, autocreate")
+	sampleMod := fs.Int64("sample-mod", 0, "only requests whose id is divisible by this (dry-run spot checks)")
 	_ = fs.Parse(args)
 
 	mode := axonimport.ProjectMode(*projectMode)
 	if mode != axonimport.ProjectsOff && mode != axonimport.ProjectsMatch && mode != axonimport.ProjectsAutoCreate {
 		return fmt.Errorf("unknown --projects %q", *projectMode)
+	}
+	if *write && *sampleMod > 0 {
+		return errors.New("--sample-mod is for dry runs only")
 	}
 	if *write && *dump != "" {
 		return errors.New("--write and --dump are mutually exclusive")
@@ -149,6 +170,7 @@ func cmdImport(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
+	c.applyExactOnly(projects)
 
 	var target axonimport.Target
 	if *write {
@@ -166,14 +188,15 @@ func cmdImport(ctx context.Context, args []string) error {
 	}
 
 	im := &axonimport.Importer{
-		Source:  src,
-		Mapper:  &axonimport.Mapper{UserID: c.userID, Channels: channels, Providers: providers, Projects: projects},
-		Target:  target,
-		Batch:   c.batch,
-		Workers: c.workers,
-		AfterID: c.afterID,
-		UntilID: c.untilID,
-		Limit:   *limit,
+		Source:    src,
+		Mapper:    &axonimport.Mapper{UserID: c.userID, Channels: channels, Providers: providers, Projects: projects},
+		Target:    target,
+		Batch:     c.batch,
+		Workers:   c.workers,
+		AfterID:   c.afterID,
+		UntilID:   c.untilID,
+		Limit:     *limit,
+		SampleMod: *sampleMod,
 	}
 	err = im.Run(ctx)
 	im.Summary(os.Stderr)
@@ -199,6 +222,60 @@ func cmdFinalize(ctx context.Context, args []string) error {
 	}
 	defer pico.Close()
 	return axonimport.Finalize(ctx, pico, *userID, t)
+}
+
+func cmdReproject(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("reproject", flag.ExitOnError)
+	userID := fs.Int64("user-id", 1, "PicoTera user that owns the rows")
+	projectID := fs.Int("project-id", 0, "project whose rows are re-resolved (required)")
+	batch := fs.Int("batch", 200, "meta rows per page")
+	workers := fs.Int("workers", 16, "concurrent artifact fetches")
+	write := fs.Bool("write", false, "create projects and move rows in the live PicoTera database")
+	_ = fs.Parse(args)
+	if *projectID <= 0 {
+		return errors.New("--project-id is required")
+	}
+
+	pico, err := pool(ctx, "PICOTERA_DATABASE_URL", !*write)
+	if err != nil {
+		return err
+	}
+	defer pico.Close()
+	s3, bucket, err := s3Client()
+	if err != nil {
+		return err
+	}
+	projects, err := axonimport.LoadProjects(ctx, pico, *userID, axonimport.ProjectsAutoCreate)
+	if err != nil {
+		return err
+	}
+	// The source project's own paths are what swallowed everything below
+	// them, so they may only match exactly from now on.
+	var srcPaths []string
+	if err := pico.QueryRow(ctx, `SELECT paths FROM project WHERE id = $1 AND user_id = $2`, *projectID, *userID).Scan(&srcPaths); err != nil {
+		return fmt.Errorf("load project %d: %w", *projectID, err)
+	}
+	projects.ExactOnly = map[string]bool{}
+	for _, p := range srcPaths {
+		projects.ExactOnly[p] = true
+	}
+	if *write {
+		projects.DB = pico
+	}
+
+	rp := &axonimport.Reproject{
+		DB: pico, S3: s3, Bucket: bucket, Projects: projects,
+		ProjectID: int32(*projectID), UserID: *userID,
+		Batch: *batch, Workers: *workers, Write: *write,
+	}
+	err = rp.Run(ctx)
+	rp.Report.Write(os.Stdout)
+	fmt.Fprintf(os.Stderr, "moved %d, stayed %d (artifact missing %d)\n", rp.Moved.Load(), rp.Stayed.Load(), rp.Missing.Load())
+	if err != nil || !*write {
+		return err
+	}
+	since := time.Now().AddDate(0, 0, -40)
+	return axonimport.RefreshProjects(ctx, pico, rp.TouchedProjects(), since)
 }
 
 func resolveUntil(ctx context.Context, src *axonimport.Source, c *common) error {

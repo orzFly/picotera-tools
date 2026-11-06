@@ -35,7 +35,9 @@ type Importer struct {
 	AfterID int64
 	UntilID int64
 	Limit   int64
-	Stats   Stats
+	// SampleMod > 0 imports only ids divisible by it, for dry-run spot checks.
+	SampleMod int64
+	Stats     Stats
 }
 
 func (im *Importer) Run(ctx context.Context) error {
@@ -46,7 +48,7 @@ func (im *Importer) Run(ctx context.Context) error {
 		if im.Limit > 0 && int64(n) > im.Limit-im.Stats.Requests.Load() {
 			n = int(im.Limit - im.Stats.Requests.Load())
 		}
-		reqs, err := im.Source.Batch(ctx, after, im.UntilID, n)
+		reqs, err := im.Source.Batch(ctx, after, im.UntilID, n, im.SampleMod)
 		if err != nil {
 			return err
 		}

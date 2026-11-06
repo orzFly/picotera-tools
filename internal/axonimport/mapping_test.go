@@ -83,3 +83,20 @@ func TestStreamResponseUsesAggregated(t *testing.T) {
 		t.Fatalf("unexpected payload %s", raw)
 	}
 }
+
+func TestExactOnlyHomeDir(t *testing.T) {
+	p := &Projects{Mode: ProjectsAutoCreate, UserID: 1, nextID: -1, names: map[string]bool{"user": true},
+		byPath:    map[string]projectPath{"/home/alice": {id: 84, name: "user"}},
+		ExactOnly: map[string]bool{"/home/alice": true}}
+	body := func(cwd string) []byte {
+		b, _ := json.Marshal(map[string]any{"system": "Primary working directory: " + cwd + "\n"})
+		return b
+	}
+	if r, _ := p.Resolve(context.Background(), body("/home/alice")); r == nil || r.ID != 84 {
+		t.Fatalf("home dir itself: got %+v, want user", r)
+	}
+	r, _ := p.Resolve(context.Background(), body("/home/alice/src/foxtrot"))
+	if r == nil || r.ID == 84 || !r.Created || r.Name != "foxtrot" {
+		t.Fatalf("repo under home: got %+v, want new foxtrot", r)
+	}
+}
