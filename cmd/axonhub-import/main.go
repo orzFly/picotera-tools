@@ -172,6 +172,7 @@ func cmdImport(ctx context.Context, args []string) error {
 	write := fs.Bool("write", false, "write to the live PicoTera database and bucket")
 	projectMode := fs.String("projects", "match", "project resolution: off, match, autocreate")
 	sampleMod := fs.Int64("sample-mod", 0, "only requests whose id is divisible by this (dry-run spot checks)")
+	reportPath := fs.String("report", "", "also write the per-project report to this file")
 	_ = fs.Parse(args)
 
 	mode := axonimport.ProjectMode(*projectMode)
@@ -236,8 +237,21 @@ func cmdImport(ctx context.Context, args []string) error {
 		Limit:     *limit,
 		SampleMod: *sampleMod,
 	}
+	if *reportPath != "" {
+		im.Report = axonimport.NewProjectReport()
+	}
 	err = im.Run(ctx)
 	im.Summary(os.Stderr)
+	if im.Report != nil {
+		f, ferr := os.Create(*reportPath)
+		if ferr != nil {
+			return errors.Join(err, ferr)
+		}
+		im.Report.Write(f)
+		if ferr := f.Close(); ferr != nil {
+			return errors.Join(err, ferr)
+		}
+	}
 	return err
 }
 

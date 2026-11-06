@@ -38,6 +38,7 @@ type Importer struct {
 	// SampleMod > 0 imports only ids divisible by it, for dry-run spot checks.
 	SampleMod int64
 	Stats     Stats
+	Report    *ProjectReport
 }
 
 func (im *Importer) Run(ctx context.Context) error {
@@ -102,6 +103,7 @@ func (im *Importer) runBatch(ctx context.Context, reqs []*Request) error {
 			im.Stats.Skipped.Add(1)
 			continue
 		}
+		im.Report.add(rec.Project, rec.Rows[0].CreatedAt)
 		switch p := rec.Project; {
 		case p == nil:
 			im.Stats.ProjectNone.Add(1)
@@ -187,7 +189,14 @@ func RunProjectReport(ctx context.Context, src *Source, projects *Projects, afte
 	return rep, nil
 }
 
+func NewProjectReport() *ProjectReport {
+	return &ProjectReport{entries: map[string]*reportEntry{}}
+}
+
 func (rep *ProjectReport) add(res *Resolution, at time.Time) {
+	if rep == nil {
+		return
+	}
 	rep.mu.Lock()
 	defer rep.mu.Unlock()
 	if res == nil {
