@@ -1,0 +1,7 @@
+/.direnv/
+/.env
+/.env.*
+/.research/
+/.opencode/
+/bin/
+/dist/
