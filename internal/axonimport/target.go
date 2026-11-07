@@ -262,9 +262,9 @@ func (d *DumpTarget) Write(_ context.Context, rec *Record) error {
 	return nil
 }
 
-// int4 drops values PicoTera's integer columns cannot hold. AxonHub wrote
-// metrics_latency_ms = -9223372036854 (MinInt64 / 1e6) for requests whose
-// end time it never recorded; none of these columns has a meaningful negative.
+// int4 drops values PicoTera's integer columns cannot hold. AxonHub can write
+// metrics_latency_ms = -9223372036854 (MinInt64 / 1e6) for requests whose end
+// time it never recorded; none of these columns has a meaningful negative.
 func int4(v *int64) *int32 {
 	if v == nil || *v < 0 || *v > math.MaxInt32 {
 		return nil

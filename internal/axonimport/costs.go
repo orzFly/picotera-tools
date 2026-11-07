@@ -21,6 +21,8 @@ type BackfillCosts struct {
 	AfterID int64
 	UntilID int64
 	Write   bool
+	// Currency is what AxonHub's costs are in; see Source.Currency.
+	Currency string
 
 	Requests int64
 	Rows     int64
@@ -77,8 +79,8 @@ func (b *BackfillCosts) Run(ctx context.Context) error {
 			}
 			at := metaID.Time().UTC()
 			if b.Write {
-				batch.Queue(`UPDATE request SET model_cost = $1, model_cost_currency = '`+AxonHubCurrency+`'`+
-					` WHERE (id, created_at) IN (SELECT id, created_at`+costMatch+`)`, c.total, metaID.String(), at)
+				batch.Queue(`UPDATE request SET model_cost = $1, model_cost_currency = $4`+
+					` WHERE (id, created_at) IN (SELECT id, created_at`+costMatch+`)`, c.total, metaID.String(), at, b.Currency)
 			} else {
 				batch.Queue(`SELECT count(*)`+costMatch, c.total, metaID.String(), at)
 			}
@@ -119,7 +121,7 @@ func (b *BackfillCosts) Run(ctx context.Context) error {
 			return fmt.Errorf("costs after axonhub id %d: %w", after, err)
 		}
 		after = costs[len(costs)-1].id
-		log.Printf("costs through axonhub id %d: %d requests, %d rows, %.2f %s", after, b.Requests, b.Rows, b.Total, AxonHubCurrency)
+		log.Printf("costs through axonhub id %d: %d requests, %d rows, %.2f %s", after, b.Requests, b.Rows, b.Total, b.Currency)
 	}
 }
 

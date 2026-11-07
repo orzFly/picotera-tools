@@ -15,9 +15,8 @@ import (
 	"github.com/jackc/pgx/v5/pgxpool"
 )
 
-// Fold the fragments PicoTera's
-// auto-creation leaves behind (one project per worktree, one per machine)
-// back into the project of the repository.
+// Fold the fragments PicoTera's auto-creation leaves behind (one project per
+// worktree, one per machine) back into the project of the repository.
 
 type MergeProject struct {
 	ID          int32
@@ -195,7 +194,7 @@ func (r *Rules) PlanMerges(projects []MergeProject) []MergePlan {
 			}
 			primary := ""
 			for _, k := range keys {
-				if strings.HasPrefix(k, MainRoot+"/") {
+				if r.MainRoot != "" && strings.HasPrefix(k, r.MainRoot+"/") {
 					primary = k
 					break
 				}

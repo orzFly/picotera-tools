@@ -81,13 +81,14 @@ func main() {
 }
 
 type common struct {
-	assign  assignFlag
-	roots   rootsFlag
-	userID  int64
-	afterID int64
-	untilID int64
-	batch   int
-	workers int
+	rulesPath string
+	assign    assignFlag
+	roots     rootsFlag
+	userID    int64
+	afterID   int64
+	untilID   int64
+	batch     int
+	workers   int
 }
 
 func (c *common) register(fs *flag.FlagSet) {
@@ -96,6 +97,7 @@ func (c *common) register(fs *flag.FlagSet) {
 	fs.Int64Var(&c.untilID, "until-id", 0, "stop at this AxonHub request id, inclusive (0 = current max)")
 	fs.IntVar(&c.batch, "batch", 100, "AxonHub requests per query")
 	fs.IntVar(&c.workers, "workers", 8, "concurrent mapping/upload workers")
+	fs.StringVar(&c.rulesPath, "rules", "", "JSON file with mainRoot, aliases, blacklist and roots for workspace paths")
 	fs.Var(&c.roots, "root", "PATH: workspaces under PATH belong to the project at PATH (repeatable)")
 	fs.Var(&c.assign, "assign", "PATH=PROJECT_ID: put workspaces at or under PATH into that project without adding the path (repeatable)")
 }
@@ -158,12 +160,15 @@ type rootsFlag []string
 func (r *rootsFlag) String() string     { return strings.Join(*r, ",") }
 func (r *rootsFlag) Set(v string) error { *r = append(*r, v); return nil }
 
-func (c *common) rules() *axonimport.Rules {
-	rules := axonimport.DefaultRules()
+func (c *common) rules() (*axonimport.Rules, error) {
+	rules, err := axonimport.LoadRules(c.rulesPath)
+	if err != nil {
+		return nil, err
+	}
 	for _, r := range c.roots {
 		rules.Roots = append(rules.Roots, rules.Canonical(r))
 	}
-	return rules
+	return rules, nil
 }
 
 func (c *common) applyAssign(p *axonimport.Projects) {
@@ -192,7 +197,11 @@ func cmdProjects(ctx context.Context, args []string) error {
 	}
 	// Auto-creation is simulated in memory so the report shows the names
 	// PicoTera would pick, including collision suffixes.
-	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, axonimport.ProjectsAutoCreate, c.rules())
+	rules, err := c.rules()
+	if err != nil {
+		return err
+	}
+	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, axonimport.ProjectsAutoCreate, rules)
 	if err != nil {
 		return err
 	}
@@ -272,7 +281,11 @@ func cmdImport(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, mode, c.rules())
+	rules, err := c.rules()
+	if err != nil {
+		return err
+	}
+	projects, err := axonimport.LoadProjects(ctx, pico, c.userID, mode, rules)
 	if err != nil {
 		return err
 	}
@@ -370,6 +383,7 @@ func cmdReproject(ctx context.Context, args []string) error {
 	batch := fs.Int("batch", 200, "meta rows per page")
 	workers := fs.Int("workers", 16, "concurrent artifact fetches")
 	write := fs.Bool("write", false, "create projects and move rows in the live PicoTera database")
+	rulesPath := fs.String("rules", "", "JSON rules file (see import -rules)")
 	_ = fs.Parse(args)
 	if *projectID <= 0 {
 		return errors.New("--project-id is required")
@@ -384,7 +398,10 @@ func cmdReproject(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	rules := axonimport.DefaultRules()
+	rules, err := axonimport.LoadRules(*rulesPath)
+	if err != nil {
+		return err
+	}
 	// The source project's own paths are what swallowed everything below
 	// them, so they may only match exactly from now on.
 	var srcPaths []string
@@ -503,13 +520,17 @@ func cmdCosts(ctx context.Context, args []string) error {
 			return err
 		}
 	}
-	b := &axonimport.BackfillCosts{Axon: axon, Pico: pico, Batch: *batch, AfterID: *afterID, UntilID: *untilID, Write: *write}
+	currency, err := axonimport.NewSource(axon).Currency(ctx)
+	if err != nil {
+		return err
+	}
+	b := &axonimport.BackfillCosts{Axon: axon, Pico: pico, Batch: *batch, AfterID: *afterID, UntilID: *untilID, Write: *write, Currency: currency}
 	err = b.Run(ctx)
 	verb := "would update"
 	if *write {
 		verb = "updated"
 	}
-	fmt.Fprintf(os.Stderr, "%s %d rows on %d requests, %.2f %s\n", verb, b.Rows, b.Requests, b.Total, axonimport.AxonHubCurrency)
+	fmt.Fprintf(os.Stderr, "%s %d rows on %d requests, %.2f %s\n", verb, b.Rows, b.Requests, b.Total, currency)
 	if err != nil || !*write || b.Rows == 0 {
 		return err
 	}
@@ -520,7 +541,12 @@ func cmdMergeProjects(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("merge-projects", flag.ExitOnError)
 	userID := fs.Int64("user-id", 1, "PicoTera user whose projects are merged")
 	write := fs.Bool("write", false, "apply the plan; merges cannot be undone")
+	rulesPath := fs.String("rules", "", "JSON rules file (see import -rules)")
 	_ = fs.Parse(args)
+	rules, err := axonimport.LoadRules(*rulesPath)
+	if err != nil {
+		return err
+	}
 
 	pico, err := pool(ctx, "PICOTERA_DATABASE_URL", !*write)
 	if err != nil {
@@ -531,7 +557,7 @@ func cmdMergeProjects(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	plans := axonimport.DefaultRules().PlanMerges(projects)
+	plans := rules.PlanMerges(projects)
 	axonimport.ShowMergePlans(os.Stdout, plans)
 	if !*write {
 		if len(plans) > 0 {

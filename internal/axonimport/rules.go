@@ -1,6 +1,9 @@
 package axonimport
 
 import (
+	"encoding/json"
+	"fmt"
+	"os"
 	"regexp"
 	"sort"
 	"strings"
@@ -10,7 +13,10 @@ import (
 // changes proposed for PicoTera in docs/picotera-project-matching.md, so the
 // importer, reproject and merge-projects agree on one canonical form.
 type Rules struct {
-	Aliases []Alias
+	// MainRoot is the directory repositories canonically live under; merges
+	// name a project after the repository found there first.
+	MainRoot string
+	Aliases  []Alias
 	// Blacklist paths (canonical) never seed a project and never match as an
 	// ancestor; a project path equal to the workspace still matches.
 	Blacklist map[string]bool
@@ -24,27 +30,68 @@ type Alias struct {
 	To   string         // canonical prefix, always '/'-separated
 }
 
-const MainRoot = "/home/alice/src"
-
+// DefaultRules only knows worktree layouts; everything about a particular
+// set of machines comes from a rules file.
 func DefaultRules() *Rules {
-	alias := func(re, to string) Alias { return Alias{From: regexp.MustCompile(re), To: to} }
-	return &Rules{
-		Aliases: []Alias{
-			alias(`^/Users/alice/src(?:[\\/]|$)`, MainRoot),
-			alias(`^(?i:D:\\Alice\\src)(?:\\|$)`, MainRoot),
-			alias(`^/home/al/src(?:/|$)`, MainRoot),
-			alias(`^/home/alice/sandbox/homes/bob/code(?:/|$)`, "/home/alice/code"),
-		},
-		Blacklist: map[string]bool{
-			"/home/alice":     true,
-			"/home/carol": true,
-			"/home/al":   true,
-			"/Users/alice":    true,
-			"/root":          true,
-			`D:\Alice`:        true,
-			`C:\Users\alice`:  true,
-		},
+	return &Rules{Blacklist: map[string]bool{}}
+}
+
+// RulesFile is the JSON form of the machine-specific rules:
+//
+//	{
+//	  "mainRoot": "/home/alice/src",
+//	  "aliases": [{"from": "/Users/alice/src", "to": "/home/alice/src"},
+//	              {"from": "C:\\Users\\alice\\src", "to": "/home/alice/src"}],
+//	  "blacklist": ["/home/alice", "/Users/alice"],
+//	  "roots": ["/home/alice/src/monorepo"]
+//	}
+//
+// An alias "from" written with backslashes matches case-insensitively, as
+// Windows paths do.
+type RulesFile struct {
+	MainRoot string `json:"mainRoot"`
+	Aliases  []struct {
+		From string `json:"from"`
+		To   string `json:"to"`
+	} `json:"aliases"`
+	Blacklist []string `json:"blacklist"`
+	Roots     []string `json:"roots"`
+}
+
+func LoadRules(path string) (*Rules, error) {
+	r := DefaultRules()
+	if path == "" {
+		return r, nil
 	}
+	raw, err := os.ReadFile(path)
+	if err != nil {
+		return nil, err
+	}
+	var f RulesFile
+	if err := json.Unmarshal(raw, &f); err != nil {
+		return nil, fmt.Errorf("%s: %w", path, err)
+	}
+	r.MainRoot = CleanPath(f.MainRoot)
+	for _, a := range f.Aliases {
+		from := CleanPath(a.From)
+		if from == "" || a.To == "" {
+			return nil, fmt.Errorf("%s: alias needs from and to", path)
+		}
+		re := "^" + regexp.QuoteMeta(from) + `(?:[\\/]|$)`
+		if strings.Contains(from, `\`) {
+			re = "^(?i:" + regexp.QuoteMeta(from) + `)(?:[\\/]|$)`
+		}
+		r.Aliases = append(r.Aliases, Alias{From: regexp.MustCompile(re), To: CleanPath(a.To)})
+	}
+	// Aliases are tried in order; the longest prefix should win.
+	sort.SliceStable(r.Aliases, func(i, j int) bool { return len(r.Aliases[i].From.String()) > len(r.Aliases[j].From.String()) })
+	for _, b := range f.Blacklist {
+		r.Blacklist[r.Canonical(b)] = true
+	}
+	for _, root := range f.Roots {
+		r.Roots = append(r.Roots, r.Canonical(root))
+	}
+	return r, nil
 }
 
 var worktreeRe = regexp.MustCompile(`^(.+?)[\\/](?:\.claude[\\/]worktrees|\.worktrees)[\\/]([^\\/]+)`)

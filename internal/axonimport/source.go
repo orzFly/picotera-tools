@@ -55,13 +55,34 @@ type Usage struct {
 	WriteCached5m    int64
 	WriteCached1h    int64
 	TotalCost        *float64
+	Currency         string
 }
 
 type Source struct {
-	pool *pgxpool.Pool
+	pool     *pgxpool.Pool
+	currency string
 }
 
 func NewSource(pool *pgxpool.Pool) *Source { return &Source{pool: pool} }
+
+// Currency is what AxonHub's usage_logs.total_cost is denominated in: the
+// currency_code general setting, USD when unset as in AxonHub's defaults.
+func (s *Source) Currency(ctx context.Context) (string, error) {
+	if s.currency != "" {
+		return s.currency, nil
+	}
+	var code *string
+	err := s.pool.QueryRow(ctx, `
+		SELECT (SELECT value::jsonb ->> 'currency_code' FROM systems WHERE key = 'system_general_settings')`).Scan(&code)
+	if err != nil {
+		return "", fmt.Errorf("read currency: %w", err)
+	}
+	s.currency = "USD"
+	if code != nil && *code != "" {
+		s.currency = *code
+	}
+	return s.currency, nil
+}
 
 func (s *Source) Channels(ctx context.Context) (map[int64]string, error) {
 	rows, err := s.pool.Query(ctx, `SELECT id, name FROM channels`)
@@ -149,7 +170,12 @@ func (s *Source) Batch(ctx context.Context, afterID, untilID int64, limit int, s
 		return nil, err
 	}
 
-	// One request has two usage_logs rows; ORDER BY id lets the later one win.
+	currency, err := s.Currency(ctx)
+	if err != nil {
+		return nil, err
+	}
+	// A request can have several usage_logs rows; ORDER BY id lets the
+	// latest win.
 	rows, err = s.pool.Query(ctx, `
 		SELECT request_id, channel_id, prompt_tokens, completion_tokens,
 		       COALESCE(prompt_cached_tokens, 0), COALESCE(prompt_write_cached_tokens, 0),
@@ -162,7 +188,7 @@ func (s *Source) Batch(ctx context.Context, afterID, untilID int64, limit int, s
 	}
 	for rows.Next() {
 		var reqID int64
-		u := &Usage{}
+		u := &Usage{Currency: currency}
 		if err := rows.Scan(&reqID, &u.ChannelID, &u.PromptTokens, &u.CompletionTokens,
 			&u.CachedTokens, &u.WriteCached, &u.WriteCached5m, &u.WriteCached1h, &u.TotalCost); err != nil {
 			rows.Close()

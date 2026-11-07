@@ -34,7 +34,7 @@ func TestDeterministicID(t *testing.T) {
 
 func TestApplyUsageExcludesCache(t *testing.T) {
 	var row Row
-	applyUsage(&row, &Usage{PromptTokens: 17359, CompletionTokens: 166, CachedTokens: 14324, WriteCached: 3032, WriteCached1h: 3032})
+	applyUsage(&row, &Usage{PromptTokens: 17359, CompletionTokens: 166, CachedTokens: 14324, WriteCached: 3032, WriteCached1h: 3032, Currency: "USD"})
 	if *row.InputTokens != 3 || *row.CacheReadTokens != 14324 || *row.CacheWriteTokens != 0 || *row.CacheWrite1hTokens != 3032 {
 		t.Fatalf("got input=%d read=%d write=%d write1h=%d", *row.InputTokens, *row.CacheReadTokens, *row.CacheWriteTokens, *row.CacheWrite1hTokens)
 	}

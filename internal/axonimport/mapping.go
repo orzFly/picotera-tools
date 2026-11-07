@@ -336,13 +336,9 @@ func applyUsage(row *Row, u *Usage) {
 	}
 	if u.TotalCost != nil {
 		row.ModelCost = u.TotalCost
-		row.ModelCostCurrency = ptr(AxonHubCurrency)
+		row.ModelCostCurrency = ptr(u.Currency)
 	}
 }
-
-// AxonHubCurrency is system_general_settings.currency_code on the source AxonHub;
-// usage_logs.total_cost is in it.
-const AxonHubCurrency = "USD"
 
 // usageRaw keeps the provider's own usage object; PicoTera drops anything
 // that is not a JSON object.
