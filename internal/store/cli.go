@@ -195,8 +195,7 @@ func cmdArchive(ctx context.Context, args []string, log *slog.Logger) error {
 	fs.BoolVar(&a.del, "delete", false, "delete loose objects the archive holds with the same key and ETag")
 	fs.BoolVar(&a.dryRun, "dry-run", false, "list the days that would be archived")
 	fs.IntVar(&a.fetchers, "fetchers", 8, "loose objects downloaded at once")
-	fs.StringVar(&a.format, "format", "v1", "archive format for new days: v1 or v2")
-	fs.DurationVar(&a.grace, "grace", 2*currentTTL, "wait between switching CURRENT and deleting loose objects")
+	fs.StringVar(&a.format, "format", "v2", "archive format for new days: v2, or v1 for the older layout")
 	fs.Parse(args)
 	if a.format != "v1" && a.format != "v2" {
 		return fmt.Errorf("--format must be v1 or v2, not %q", a.format)

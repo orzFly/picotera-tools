@@ -92,17 +92,30 @@ func (f *fallback) lookup(ctx context.Context, key string) (*cachedEntry, error)
 	if !ok {
 		return nil, nil
 	}
-	gen, err := f.currentGeneration(ctx, day)
-	if err != nil || gen == "" {
-		return nil, err
-	}
-	ix, err := f.index(ctx, day, gen)
-	if err != nil {
-		return nil, err
-	}
-	i, ok := ix.lookup(key)
-	if !ok {
-		return nil, nil
+	// The archive run deletes loose objects as soon as CURRENT moves, so a CURRENT cached from
+	// before the move can be missing the key that was just packed: re-read it once on a miss.
+	var ix *archiveIndex
+	var gen string
+	var i int
+	for fresh := false; ; fresh = true {
+		g, err := f.currentGeneration(ctx, day, fresh)
+		if err != nil {
+			return nil, err
+		}
+		found := false
+		if g != "" {
+			if ix, err = f.index(ctx, day, g); err != nil {
+				return nil, err
+			}
+			i, found = ix.lookup(key)
+		}
+		if found {
+			gen = g
+			break
+		}
+		if fresh || !f.mayRefresh(day) {
+			return nil, nil
+		}
 	}
 	fid := frameID{day, gen, ix.Entries[i].Frame}
 	if ix.Version == indexV2 {
@@ -145,11 +158,20 @@ func (f *fallback) lookup(ctx context.Context, key string) (*cachedEntry, error)
 	}
 }
 
-func (f *fallback) currentGeneration(ctx context.Context, day string) (string, error) {
+// mayRefresh says whether day's cached CURRENT is old enough to be worth re-reading on a miss;
+// a key that is simply absent should not cost an S3 request every time it is asked for.
+func (f *fallback) mayRefresh(day string) bool {
+	f.mu.Lock()
+	defer f.mu.Unlock()
+	c, ok := f.current[day]
+	return ok && f.now().Sub(c.at) >= currentRefresh
+}
+
+func (f *fallback) currentGeneration(ctx context.Context, day string, fresh bool) (string, error) {
 	f.mu.Lock()
 	c, ok := f.current[day]
 	f.mu.Unlock()
-	if ok && f.now().Sub(c.at) < currentTTL {
+	if !fresh && ok && f.now().Sub(c.at) < currentTTL {
 		return c.gen, nil
 	}
 	gen, err := readCurrent(ctx, f.st, f.bucket, day)

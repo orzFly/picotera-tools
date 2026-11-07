@@ -33,11 +33,8 @@ type archiver struct {
 	// mem, when set, holds the entries convert read out of a v1 generation, each zstd-compressed
 	// on its own; they stand in for loose objects.
 	mem map[string]memEntry
-	// picotera-s3proxy caches CURRENT for currentTTL; loose objects outlive the switch by twice
-	// that, so a reader still holding the old generation finds the key one way or the other.
-	grace time.Duration
-	now   func() time.Time
-	log   *slog.Logger
+	now func() time.Time
+	log *slog.Logger
 }
 
 type dayStatus struct {
@@ -74,46 +71,19 @@ func (a *archiver) run(ctx context.Context) error {
 	if err != nil {
 		return err
 	}
-	// Days wait here for their loose objects to be deleted: a day whose CURRENT this run moved
-	// waits out the grace (readers may hold the old CURRENT for currentTTL), one that was
-	// already archived is due at once. Due days are deleted between days, so space comes back
-	// as the run goes instead of at its end.
-	type due struct {
-		day int // index into rs.Days
-		at  time.Time
-	}
-	var queue []due // ordered by at
-	enqueue := func(day int, at time.Time) {
-		i := sort.Search(len(queue), func(i int) bool { return queue[i].at.After(at) })
-		queue = append(queue[:i], append([]due{{day, at}}, queue[i:]...)...)
-	}
 	var failed []string
 	switched := map[string]bool{}
-	deleteDue := func(wait bool) error {
-		for len(queue) > 0 {
-			q := queue[0]
-			if d := time.Until(q.at); d > 0 {
-				if !wait {
-					return nil
-				}
-				a.log.Info("waiting before deleting loose objects", "day", rs.Days[q.day].Day, "wait", d.Round(time.Second))
-				select {
-				case <-time.After(d):
-				case <-ctx.Done():
-					return ctx.Err()
-				}
-			}
-			queue = queue[1:]
-			n, err := a.deleteCovered(ctx, rs.Days[q.day].Day)
-			rs.Days[q.day].Deleted = n
-			if err != nil {
-				rs.Days[q.day].Error = "delete: " + err.Error()
-				failed = append(failed, rs.Days[q.day].Day)
-				continue
-			}
-			a.log.Info("deleted loose objects", "day", rs.Days[q.day].Day, "deleted", n)
+	// Readers re-read CURRENT when the generation they cached misses a key, so a day's loose
+	// objects can go as soon as its CURRENT is in place, and space comes back as the run goes.
+	deleteDay := func(i int) {
+		n, err := a.deleteCovered(ctx, rs.Days[i].Day)
+		rs.Days[i].Deleted = n
+		if err != nil {
+			rs.Days[i].Error = "delete: " + err.Error()
+			failed = append(failed, rs.Days[i].Day)
+			return
 		}
-		return nil
+		a.log.Info("deleted loose objects", "day", rs.Days[i].Day, "deleted", n)
 	}
 	for _, d := range days {
 		loose, err := a.st.List(ctx, a.bucket, "artifacts/"+d+"/")
@@ -133,7 +103,7 @@ func (a *archiver) run(ctx context.Context) error {
 			rs.Days = append(rs.Days, ds)
 			a.log.Info("already archived", "day", d, "generation", ds.Generation, "loose_objects", len(loose))
 			if a.del && !a.dryRun {
-				enqueue(len(rs.Days)-1, time.Now())
+				deleteDay(len(rs.Days) - 1)
 			}
 		} else if a.dryRun {
 			a.log.Info("would archive", "day", d, "loose_objects", len(loose))
@@ -150,20 +120,14 @@ func (a *archiver) run(ctx context.Context) error {
 			switched[d] = true
 			a.log.Info("archived", "day", d, "entries", ds.Entries, "ratio", fmt.Sprintf("%.1f", ds.Ratio), "seconds", int(ds.Seconds))
 			if a.del {
-				enqueue(len(rs.Days)-1, time.Now().Add(a.grace))
+				deleteDay(len(rs.Days) - 1)
 			}
-		}
-		if err := deleteDue(false); err != nil {
-			return err
 		}
 	}
 	if a.dryRun {
 		return nil
 	}
 	if a.del {
-		if err := deleteDue(true); err != nil {
-			return err
-		}
 		removed, err := a.removeOldGenerations(ctx, gen, switched)
 		rs.RemovedGenerations = removed
 		if err != nil {

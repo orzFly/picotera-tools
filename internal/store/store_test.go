@@ -67,7 +67,7 @@ func newTestArchiver(st store, del bool) *archiver {
 	return &archiver{
 		st: st, bucket: testBucket, archBucket: testArch, minAge: 2, del: del,
 		frameSize: 64 << 10, windowLog: defaultWindowLog, level: zstd.SpeedDefault,
-		fetchers: 4, grace: 0, now: func() time.Time { return time.Date(2026, 1, 16, 4, 0, 0, 0, time.UTC) }, log: quiet,
+		fetchers: 4, now: func() time.Time { return time.Date(2026, 1, 16, 4, 0, 0, 0, time.UTC) }, log: quiet,
 	}
 }
 
@@ -579,7 +579,7 @@ func TestDeleteOnlyWhatTheIndexCovers(t *testing.T) {
 	}
 }
 
-// Each day's loose objects go as soon as its grace has passed, while later days are still being
+// Each day's loose objects go as soon as its CURRENT is in place, while later days are still being
 // packed, not all at the end of the run.
 func TestDeletionFollowsTheRun(t *testing.T) {
 	ctx := context.Background()
@@ -606,4 +606,72 @@ func TestDeletionFollowsTheRun(t *testing.T) {
 	if objs, _ := st.List(ctx, testBucket, "artifacts/2026-01-09/"); len(objs) != 0 {
 		t.Fatalf("the last day kept %d loose objects", len(objs))
 	}
+}
+
+// Loose objects go the moment CURRENT moves, so a reader holding a CURRENT cached from before
+// the move must re-read it rather than answer 404.
+func TestStaleCurrentIsReread(t *testing.T) {
+	ctx := context.Background()
+	st := newMemStore()
+	want := seed(t, st, testDay, 6, 31)
+	now := time.Date(2026, 1, 16, 4, 0, 0, 0, time.UTC)
+	fb := newFallback(st, testArch, 2, 1<<30, 1<<30, 1<<30, 1<<30, 0, quiet)
+	fb.now = func() time.Time { return now }
+	first := "artifacts/" + testDay + "/id0000.request.json.zst"
+
+	// Not archived yet: the miss caches "no CURRENT".
+	if e, err := fb.lookup(ctx, first); err != nil || e != nil {
+		t.Fatalf("before archiving: %v %v", e, err)
+	}
+	if err := newTestArchiver(st, true).run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	now = now.Add(2 * currentRefresh) // well inside currentTTL
+	e, err := fb.lookup(ctx, first)
+	if err != nil || e == nil {
+		t.Fatalf("a day archived after its CURRENT was cached as absent: %v %v", e, err)
+	}
+	if raw, _ := decodeHTTPBody(e.body); !bytes.Equal(raw, want[first]) {
+		t.Fatal("wrong bytes")
+	}
+
+	// A key packed into a newer generation than the cached one.
+	late := "artifacts/" + testDay + "/zz-late.request.json.zst"
+	st.Put(ctx, testBucket, late, bytes.NewReader(zstdObject(t, []byte(`{"late":true}`))), -1, "application/json")
+	a := newTestArchiver(st, true)
+	a.now = func() time.Time { return time.Date(2026, 1, 17, 4, 0, 0, 0, time.UTC) }
+	if err := a.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if st.has(testBucket, late) {
+		t.Fatal("the late object was not deleted at once")
+	}
+	now = now.Add(2 * currentRefresh)
+	if e, err := fb.lookup(ctx, late); err != nil || e == nil {
+		t.Fatalf("a key in a newer generation than the cached CURRENT: %v %v", e, err)
+	}
+
+	// An absent key re-reads CURRENT at most once per currentRefresh.
+	reads := 0
+	counting := &hookStore{memStore: st, onGet: func(string) {}}
+	fb.st = &currentCounter{store: counting, n: &reads}
+	missing := "artifacts/" + testDay + "/nope.request.json.zst"
+	for k := 0; k < 5; k++ {
+		fb.lookup(ctx, missing)
+	}
+	if reads > 1 {
+		t.Fatalf("CURRENT re-read %d times for one absent key within currentRefresh", reads)
+	}
+}
+
+type currentCounter struct {
+	store
+	n *int
+}
+
+func (c *currentCounter) Get(ctx context.Context, bucket, key string) (io.ReadCloser, objectInfo, error) {
+	if strings.HasSuffix(key, "/CURRENT") {
+		*c.n++
+	}
+	return c.store.Get(ctx, bucket, key)
 }

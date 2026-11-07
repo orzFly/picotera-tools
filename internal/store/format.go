@@ -20,6 +20,7 @@ const (
 	defaultFrameSize = 1 << 30
 	defaultWindowLog = 28
 	currentTTL       = 60 * time.Second
+	currentRefresh   = time.Second // least age of a cached CURRENT before a miss re-reads it
 )
 
 type frameInfo struct {
