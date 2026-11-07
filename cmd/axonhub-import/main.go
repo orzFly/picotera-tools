@@ -33,6 +33,8 @@ commands:
   finalize   upsert traces, project first/last seen, refresh aggregates (needs --write)
   reproject  re-resolve the project of rows in one PicoTera project from their
              request artifacts; dry-run unless --write
+  costs      copy AxonHub's recorded costs onto requests imported without them;
+             dry-run unless --write
   merge-projects
              fold worktree and other-machine fragments into the repository's
              project; prints the plan unless --write
@@ -61,6 +63,8 @@ func main() {
 		err = cmdFinalize(ctx, os.Args[2:])
 	case "reproject":
 		err = cmdReproject(ctx, os.Args[2:])
+	case "costs":
+		err = cmdCosts(ctx, os.Args[2:])
 	case "merge-projects":
 		err = cmdMergeProjects(ctx, os.Args[2:])
 	default:
@@ -379,6 +383,38 @@ func cmdReproject(ctx context.Context, args []string) error {
 	}
 	since := time.Now().AddDate(0, 0, -40)
 	return axonimport.RefreshProjects(ctx, pico, rp.ProjectID, rp.TargetProjects(), since)
+}
+
+func cmdCosts(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("costs", flag.ExitOnError)
+	afterID := fs.Int64("after-id", 0, "start after this AxonHub request id")
+	untilID := fs.Int64("until-id", 0, "stop at this AxonHub request id, inclusive (0 = current max)")
+	batch := fs.Int("batch", 500, "requests per round trip")
+	write := fs.Bool("write", false, "update the live PicoTera database")
+	_ = fs.Parse(args)
+
+	axon, pico, err := connect(ctx, *write)
+	if err != nil {
+		return err
+	}
+	defer axon.Close()
+	defer pico.Close()
+	if *untilID == 0 {
+		if *untilID, err = axonimport.NewSource(axon).MaxID(ctx); err != nil {
+			return err
+		}
+	}
+	b := &axonimport.BackfillCosts{Axon: axon, Pico: pico, Batch: *batch, AfterID: *afterID, UntilID: *untilID, Write: *write}
+	err = b.Run(ctx)
+	verb := "would update"
+	if *write {
+		verb = "updated"
+	}
+	fmt.Fprintf(os.Stderr, "%s %d rows on %d requests, %.2f %s\n", verb, b.Rows, b.Requests, b.Total, axonimport.AxonHubCurrency)
+	if err != nil || !*write || b.Rows == 0 {
+		return err
+	}
+	return axonimport.RefreshOverview(ctx, pico, b.Earliest)
 }
 
 func cmdMergeProjects(ctx context.Context, args []string) error {

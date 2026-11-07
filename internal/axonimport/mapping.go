@@ -56,6 +56,8 @@ type Row struct {
 	UserMessagePreview *string
 	Annotations        map[string]string
 	UsageRaw           json.RawMessage
+	ModelCost          *float64
+	ModelCostCurrency  *string
 }
 
 type Artifact struct {
@@ -312,7 +314,15 @@ func applyUsage(row *Row, u *Usage) {
 	} else {
 		row.CacheWriteTokens = ptr(u.WriteCached)
 	}
+	if u.TotalCost != nil {
+		row.ModelCost = u.TotalCost
+		row.ModelCostCurrency = ptr(AxonHubCurrency)
+	}
 }
+
+// AxonHubCurrency is system_general_settings.currency_code on the source AxonHub;
+// usage_logs.total_cost is in it.
+const AxonHubCurrency = "USD"
 
 // usageRaw keeps the provider's own usage object; PicoTera drops anything
 // that is not a JSON object.

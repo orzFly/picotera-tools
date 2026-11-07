@@ -118,12 +118,14 @@ func (p *Picotera) Write(ctx context.Context, rec *Record) error {
 		batch.Queue(`
 			INSERT INTO request (id, created_at, span_id, parent_span_id, type, provider_id, endpoint_path, user_id, api_key_id, project_id,
 			  model, upstream_model, input_tokens, cache_read_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
-			  status_code, error_message, ttft_ms, time_spent_ms, finish_reason, user_message_preview, annotations, usage_raw)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24::jsonb,$25::jsonb)
+			  status_code, error_message, ttft_ms, time_spent_ms, finish_reason, user_message_preview, annotations, usage_raw,
+			  model_cost, model_cost_currency)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24::jsonb,$25::jsonb,$26,$27)
 			ON CONFLICT (id, created_at) DO NOTHING`,
 			r.ID, r.CreatedAt, r.SpanID, r.ParentSpanID, r.Type, r.ProviderID, r.EndpointPath, r.UserID, r.APIKeyID, r.ProjectID,
 			r.Model, r.UpstreamModel, int4(r.InputTokens), int4(r.CacheReadTokens), int4(r.OutputTokens), int4(r.CacheWriteTokens), int4(r.CacheWrite1hTokens),
-			int4(r.StatusCode), r.ErrorMessage, int4(r.TTFTMs), int4(r.TimeSpentMs), r.FinishReason, r.UserMessagePreview, string(ann), usage)
+			int4(r.StatusCode), r.ErrorMessage, int4(r.TTFTMs), int4(r.TimeSpentMs), r.FinishReason, r.UserMessagePreview, string(ann), usage,
+			r.ModelCost, r.ModelCostCurrency)
 	}
 	return pgx.BeginFunc(ctx, p.DB, func(tx pgx.Tx) error {
 		return tx.SendBatch(ctx, batch).Close()

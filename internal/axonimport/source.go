@@ -54,6 +54,7 @@ type Usage struct {
 	WriteCached      int64
 	WriteCached5m    int64
 	WriteCached1h    int64
+	TotalCost        *float64
 }
 
 type Source struct {
@@ -152,7 +153,7 @@ func (s *Source) Batch(ctx context.Context, afterID, untilID int64, limit int, s
 	rows, err = s.pool.Query(ctx, `
 		SELECT request_id, channel_id, prompt_tokens, completion_tokens,
 		       COALESCE(prompt_cached_tokens, 0), COALESCE(prompt_write_cached_tokens, 0),
-		       COALESCE(prompt_write_cached_tokens_5m, 0), COALESCE(prompt_write_cached_tokens_1h, 0)
+		       COALESCE(prompt_write_cached_tokens_5m, 0), COALESCE(prompt_write_cached_tokens_1h, 0), total_cost
 		FROM usage_logs
 		WHERE request_id = ANY($1)
 		ORDER BY id`, ids)
@@ -163,7 +164,7 @@ func (s *Source) Batch(ctx context.Context, afterID, untilID int64, limit int, s
 		var reqID int64
 		u := &Usage{}
 		if err := rows.Scan(&reqID, &u.ChannelID, &u.PromptTokens, &u.CompletionTokens,
-			&u.CachedTokens, &u.WriteCached, &u.WriteCached5m, &u.WriteCached1h); err != nil {
+			&u.CachedTokens, &u.WriteCached, &u.WriteCached5m, &u.WriteCached1h, &u.TotalCost); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan usage: %w", err)
 		}
