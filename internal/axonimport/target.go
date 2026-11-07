@@ -5,6 +5,7 @@ import (
 	"context"
 	"encoding/json"
 	"fmt"
+	"math"
 	"os"
 	"path/filepath"
 	"sync"
@@ -111,8 +112,8 @@ func (p *Picotera) Write(ctx context.Context, rec *Record) error {
 			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24::jsonb,$25::jsonb)
 			ON CONFLICT (id, created_at) DO NOTHING`,
 			r.ID, r.CreatedAt, r.SpanID, r.ParentSpanID, r.Type, r.ProviderID, r.EndpointPath, r.UserID, r.APIKeyID, r.ProjectID,
-			r.Model, r.UpstreamModel, r.InputTokens, r.CacheReadTokens, r.OutputTokens, r.CacheWriteTokens, r.CacheWrite1hTokens,
-			r.StatusCode, r.ErrorMessage, r.TTFTMs, r.TimeSpentMs, r.FinishReason, r.UserMessagePreview, string(ann), usage)
+			r.Model, r.UpstreamModel, int4(r.InputTokens), int4(r.CacheReadTokens), int4(r.OutputTokens), int4(r.CacheWriteTokens), int4(r.CacheWrite1hTokens),
+			int4(r.StatusCode), r.ErrorMessage, int4(r.TTFTMs), int4(r.TimeSpentMs), r.FinishReason, r.UserMessagePreview, string(ann), usage)
 	}
 	return pgx.BeginFunc(ctx, p.DB, func(tx pgx.Tx) error {
 		return tx.SendBatch(ctx, batch).Close()
@@ -245,6 +246,17 @@ func (d *DumpTarget) Write(_ context.Context, rec *Record) error {
 		}
 	}
 	return nil
+}
+
+// int4 drops values PicoTera's integer columns cannot hold. AxonHub wrote
+// metrics_latency_ms = -9223372036854 (MinInt64 / 1e6) for requests whose
+// end time it never recorded; none of these columns has a meaningful negative.
+func int4(v *int64) *int32 {
+	if v == nil || *v < 0 || *v > math.MaxInt32 {
+		return nil
+	}
+	n := int32(*v)
+	return &n
 }
 
 // ImportedHighWater is the largest AxonHub request id already in PicoTera,

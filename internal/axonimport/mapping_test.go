@@ -59,3 +59,12 @@ func TestStreamResponseUsesAggregated(t *testing.T) {
 		t.Fatalf("unexpected payload %s", raw)
 	}
 }
+
+func TestInt4DropsGarbage(t *testing.T) {
+	if int4(ptr(int64(-9223372036854))) != nil || int4(ptr(int64(1<<31))) != nil || int4(nil) != nil {
+		t.Fatal("out-of-range values must become NULL")
+	}
+	if v := int4(ptr(int64(5827))); v == nil || *v != 5827 {
+		t.Fatalf("got %v", v)
+	}
+}
