@@ -32,7 +32,8 @@ func (m *memStore) Get(_ context.Context, bucket, key string) (io.ReadCloser, ob
 	if !ok {
 		return nil, objectInfo{}, errNotFound
 	}
-	return io.NopCloser(bytes.NewReader(o.data)), objectInfo{Key: key, Size: int64(len(o.data)), ContentType: o.ct}, nil
+	sum := md5.Sum(o.data)
+	return io.NopCloser(bytes.NewReader(o.data)), objectInfo{Key: key, Size: int64(len(o.data)), ContentType: o.ct, ETag: hex.EncodeToString(sum[:])}, nil
 }
 
 func (m *memStore) GetRange(_ context.Context, bucket, key string, off, length int64) (io.ReadCloser, error) {

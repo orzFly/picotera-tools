@@ -17,7 +17,7 @@ type objectInfo struct {
 	Key         string
 	Size        int64
 	ContentType string
-	ETag        string // only List fills it
+	ETag        string
 }
 
 // store is the slice of S3 the archive and the fallback use; tests swap in memStore.
@@ -75,7 +75,7 @@ func (s *minioStore) Get(ctx context.Context, bucket, key string) (io.ReadCloser
 		}
 		return nil, objectInfo{}, err
 	}
-	return obj, objectInfo{Key: key, Size: st.Size, ContentType: st.ContentType}, nil
+	return obj, objectInfo{Key: key, Size: st.Size, ContentType: st.ContentType, ETag: strings.Trim(st.ETag, `"`)}, nil
 }
 
 func (s *minioStore) GetRange(ctx context.Context, bucket, key string, off, length int64) (io.ReadCloser, error) {

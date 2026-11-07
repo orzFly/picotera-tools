@@ -105,6 +105,12 @@ func (f *fallback) lookup(ctx context.Context, key string) (*cachedEntry, error)
 		return nil, nil
 	}
 	fid := frameID{day, gen, ix.Entries[i].Frame}
+	if ix.Version == indexV2 {
+		// A v2 read starts at the frame holding its chain's keyframe; requests sharing that
+		// start share one decode.
+		w := &v2Walker{ix: ix}
+		fid.frame = ix.Entries[w.root(i)].Frame
+	}
 	for {
 		f.mu.Lock()
 		if done, busy := f.flights[fid]; busy {
@@ -125,7 +131,11 @@ func (f *fallback) lookup(ctx context.Context, key string) (*cachedEntry, error)
 		f.flights[fid] = done
 		f.mu.Unlock()
 		res := make(chan decodeResult, 1)
-		go f.decode(fid, ix, i, done, res)
+		if ix.Version == indexV2 {
+			go f.decodeV2(fid, ix, i, done, res)
+		} else {
+			go f.decode(fid, ix, i, done, res)
+		}
 		select {
 		case r := <-res:
 			return r.entry, r.err
@@ -333,4 +343,134 @@ func decodeHTTPBody(body []byte) ([]byte, error) {
 	}
 	defer dec.Close()
 	return dec.DecodeAll(body, nil)
+}
+
+// decodeV2 is decode for format v2: walk text frames from the target's chain root, answer as soon
+// as the target is rebuilt, and cache the rebuildable entries around it.
+func (f *fallback) decodeV2(fid frameID, ix *archiveIndex, target int, done chan struct{}, res chan<- decodeResult) {
+	defer func() {
+		f.mu.Lock()
+		delete(f.flights, fid)
+		f.mu.Unlock()
+		close(done)
+	}()
+	ctx, cancel := context.WithTimeout(context.Background(), 2*time.Minute)
+	defer cancel()
+	sent := false
+	fail := func(err error) {
+		if !sent {
+			res <- decodeResult{err: err}
+			sent = true
+		}
+	}
+	select {
+	case f.sem <- struct{}{}:
+		defer func() { <-f.sem }()
+	case <-ctx.Done():
+		fail(ctx.Err())
+		return
+	}
+	f.decodes()
+	frames := func(fi int) ([]byte, error) { return f.frame(ctx, frameID{fid.day, fid.gen, fi}, ix) }
+	blobs := newBlobReader(ix, frames, 4)
+	w, err := newV2Walker(ix, frames, blobs.blob)
+	if err != nil {
+		fail(err)
+		return
+	}
+	defer w.close()
+	if err := w.open(fid.frame); err != nil {
+		fail(err)
+		return
+	}
+	type rebuilt struct {
+		i        int
+		stripped []byte
+	}
+	var behind, ahead []rebuilt
+	var behindBytes, aheadBytes int64
+	start := time.Now()
+	for {
+		i, stripped, err := w.step()
+		if errors.Is(err, io.EOF) {
+			break
+		}
+		if err != nil {
+			f.log.Error("fallback decode failed", "frame", fid, "err", err)
+			fail(err)
+			return
+		}
+		switch {
+		case i < target:
+			if stripped == nil {
+				continue
+			}
+			behind = append(behind, rebuilt{i, stripped})
+			behindBytes += int64(len(stripped))
+			for len(behind) > 0 && behindBytes > f.lookbehind {
+				behindBytes -= int64(len(behind[0].stripped))
+				behind[0] = rebuilt{}
+				behind = behind[1:]
+			}
+			continue
+		case i == target:
+			if stripped == nil {
+				fail(fmt.Errorf("%s: chain broken", ix.Entries[i].Key))
+				return
+			}
+			raw, err := w.expand(i, stripped)
+			if err != nil {
+				fail(err)
+				return
+			}
+			body, _ := encodeForHTTP(raw)
+			e := &cachedEntry{body: body, contentType: ix.Entries[i].ContentType}
+			f.entries.add(ix.Entries[i].Key, e)
+			res <- decodeResult{entry: e}
+			sent = true
+			f.log.Info("fallback hit", "key", ix.Entries[i].Key, "frame", fid.frame, "decode", time.Since(start).Round(time.Millisecond))
+			continue
+		}
+		if stripped != nil {
+			ahead = append(ahead, rebuilt{i, stripped})
+			aheadBytes += int64(len(stripped))
+		}
+		if aheadBytes >= f.lookahead {
+			break
+		}
+	}
+	if !sent {
+		fail(errors.New("target entry not reached"))
+		return
+	}
+	var neighbours []rawEntry
+	for _, r := range append(behind, ahead...) {
+		if _, ok := f.entries.get(ix.Entries[r.i].Key); ok {
+			continue
+		}
+		// Expanding touches the blob reader, which is not safe for concurrent use.
+		raw, err := w.expand(r.i, r.stripped)
+		if err != nil {
+			continue
+		}
+		neighbours = append(neighbours, rawEntry{r.i, raw})
+	}
+	f.cacheExpanded(ix, neighbours)
+}
+
+// cacheExpanded encodes already verified entries for HTTP and puts them in the entry cache.
+func (f *fallback) cacheExpanded(ix *archiveIndex, rebuilt []rawEntry) {
+	var wg sync.WaitGroup
+	sem := make(chan struct{}, min(4, runtime.NumCPU()))
+	for _, n := range rebuilt {
+		wg.Add(1)
+		sem <- struct{}{}
+		go func(e *entry, raw []byte) {
+			defer func() { <-sem; wg.Done() }()
+			if body, err := encodeForHTTP(raw); err == nil {
+				f.entries.add(e.Key, &cachedEntry{body: body, contentType: e.ContentType})
+			}
+		}(&ix.Entries[n.i], n.raw)
+	}
+	wg.Wait()
 }

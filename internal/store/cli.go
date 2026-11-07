@@ -27,6 +27,7 @@ commands:
            NoSuchKey from the archive
   archive  pack days older than --min-age-days into the archive bucket
   get      print one archived artifact, decompressed, to stdout
+  convert  rewrite archived days from format v1 as v2 (holds a day in memory)
 
 environment (flags of the same name override them):
   PICOTERA_S3_ENDPOINT, PICOTERA_S3_ACCESS_KEY, PICOTERA_S3_SECRET_KEY,
@@ -51,6 +52,8 @@ func Main(args []string) int {
 		err = cmdArchive(ctx, args[2:], log)
 	case "get":
 		err = cmdGet(ctx, args[2:])
+	case "convert":
+		err = cmdConvert(ctx, args[2:], log)
 	case "-h", "--help", "help":
 		fmt.Fprint(os.Stdout, usage)
 		return 0
@@ -68,6 +71,26 @@ func Main(args []string) int {
 type commonFlags struct {
 	s3         s3Config
 	archBucket string
+	diskCache  string
+	diskSize   string
+}
+
+// readFlags are the flags of the commands that read the archive.
+func (c *commonFlags) registerRead(fs *flag.FlagSet) {
+	fs.StringVar(&c.diskCache, "disk-cache", "", "keep archive reads in this directory (off when empty)")
+	fs.StringVar(&c.diskSize, "disk-cache-size", "1GiB", "upper bound of --disk-cache")
+}
+
+// archiveStore is the store archive reads go through, behind the disk cache when there is one.
+func (c *commonFlags) archiveStore(st store) (store, error) {
+	if c.diskCache == "" {
+		return st, nil
+	}
+	max, err := parseSize(c.diskSize)
+	if err != nil {
+		return nil, err
+	}
+	return newDiskCache(st, c.diskCache, c.archBucket, max)
 }
 
 func envBool(name string, def bool) bool {
@@ -120,6 +143,7 @@ func cmdServe(ctx context.Context, args []string, log *slog.Logger) error {
 	fs := flag.NewFlagSet("serve", flag.ExitOnError)
 	var c commonFlags
 	c.register(fs)
+	c.registerRead(fs)
 	listen := fs.String("listen", ":9910", "address to listen on")
 	upstream := fs.String("upstream", "", "where presigned reads are forwarded with their Host kept (required)")
 	maxDecodes := fs.Int("max-decodes", 2, "frames decoded at once")
@@ -142,7 +166,11 @@ func cmdServe(ctx context.Context, args []string, log *slog.Logger) error {
 	if err != nil {
 		return err
 	}
-	fb := newFallback(st, c.archBucket, *maxDecodes, *entryCache, *frameCache, *lookbehind, *lookahead, *idle, log)
+	ast, err := c.archiveStore(st)
+	if err != nil {
+		return err
+	}
+	fb := newFallback(ast, c.archBucket, *maxDecodes, *entryCache, *frameCache, *lookbehind, *lookahead, *idle, log)
 	srv := &http.Server{Addr: *listen, Handler: newServer(up, c.s3.bucket, fb, log), ReadHeaderTimeout: 10 * time.Second}
 	go func() {
 		<-ctx.Done()
@@ -167,8 +195,12 @@ func cmdArchive(ctx context.Context, args []string, log *slog.Logger) error {
 	fs.BoolVar(&a.del, "delete", false, "delete loose objects the archive holds with the same key and ETag")
 	fs.BoolVar(&a.dryRun, "dry-run", false, "list the days that would be archived")
 	fs.IntVar(&a.fetchers, "fetchers", 8, "loose objects downloaded at once")
+	fs.StringVar(&a.format, "format", "v1", "archive format for new days: v1 or v2")
 	fs.DurationVar(&a.grace, "grace", 2*currentTTL, "wait between switching CURRENT and deleting loose objects")
 	fs.Parse(args)
+	if a.format != "v1" && a.format != "v2" {
+		return fmt.Errorf("--format must be v1 or v2, not %q", a.format)
+	}
 	st, err := c.store()
 	if err != nil {
 		return err
@@ -181,6 +213,7 @@ func cmdGet(ctx context.Context, args []string) error {
 	fs := flag.NewFlagSet("get", flag.ExitOnError)
 	var c commonFlags
 	c.register(fs)
+	c.registerRead(fs)
 	fs.Parse(args)
 	if fs.NArg() != 1 {
 		return errors.New("usage: pt-store get [flags] artifacts/<day>/<file>")
@@ -189,7 +222,11 @@ func cmdGet(ctx context.Context, args []string) error {
 	if err != nil {
 		return err
 	}
-	fb := newFallback(st, c.archBucket, 1, 1<<30, 0, 0, 0, 0, slog.New(slog.NewTextHandler(os.Stderr, nil)))
+	ast, err := c.archiveStore(st)
+	if err != nil {
+		return err
+	}
+	fb := newFallback(ast, c.archBucket, 1, 1<<30, 0, 0, 0, 0, slog.New(slog.NewTextHandler(os.Stderr, nil)))
 	e, err := fb.lookup(ctx, fs.Arg(0))
 	if err != nil {
 		return err

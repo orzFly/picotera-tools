@@ -27,6 +27,12 @@ type archiver struct {
 	windowLog  int
 	level      zstd.EncoderLevel
 	fetchers   int
+	format     string // "v1" or "v2"
+	textFrame  int64  // v2 frame sizes; zero means v2TextFrame and v2BlobFrame
+	blobFrame  int64
+	// mem, when set, holds the decompressed entries convert read out of a v1 generation; they
+	// stand in for loose objects.
+	mem map[string]memEntry
 	// picotera-s3proxy caches CURRENT for currentTTL; loose objects outlive the switch by twice
 	// that, so a reader still holding the old generation finds the key one way or the other.
 	grace time.Duration
@@ -99,7 +105,7 @@ func (a *archiver) run(ctx context.Context) error {
 			rs.Days = append(rs.Days, dayStatus{Day: d, LooseObjects: len(loose)})
 			continue
 		}
-		ds, keys := a.archiveDay(ctx, d, gen, loose)
+		ds, keys := a.archiveAny(ctx, d, gen, loose)
 		rs.Days = append(rs.Days, ds)
 		if ds.Error != "" {
 			failed = append(failed, d)
@@ -172,6 +178,29 @@ func (a *archiver) days(ctx context.Context, now time.Time) ([]string, error) {
 	return days, nil
 }
 
+// archiveAny picks the format: v2 when asked for and the day is new or already v2. A v1 day keeps
+// being repacked as v1 until convert rewrites it, since the v2 writer would have to read the v1
+// frames, 1 GiB each, in sorted order.
+func (a *archiver) archiveAny(ctx context.Context, day, gen string, loose []objectInfo) (dayStatus, []string) {
+	if a.format != "v2" {
+		return a.archiveDay(ctx, day, gen, loose)
+	}
+	cur, err := readCurrent(ctx, a.st, a.archBucket, day)
+	if err != nil {
+		return dayStatus{Day: day, LooseObjects: len(loose), Error: err.Error()}, nil
+	}
+	var old *archiveIndex
+	if cur != "" {
+		if old, err = readIndex(ctx, a.st, a.archBucket, day, cur); err != nil {
+			return dayStatus{Day: day, LooseObjects: len(loose), Error: err.Error()}, nil
+		}
+		if old.Version != indexV2 {
+			return a.archiveDay(ctx, day, gen, loose)
+		}
+	}
+	return a.archiveDayV2(ctx, day, gen, loose, cur, old)
+}
+
 type mergeItem struct {
 	key    string
 	etag   string
@@ -212,6 +241,7 @@ type fetched struct {
 	key  string
 	raw  []byte
 	ct   string
+	etag string
 	size int64
 	bad  error // the object is not what picotera writes; it stays loose
 	err  error
@@ -421,7 +451,19 @@ func (a *archiver) prefetch(ctx context.Context, items []mergeItem) <-chan chan 
 	return out
 }
 
+type memEntry struct {
+	raw  []byte
+	info objectInfo
+}
+
 func (a *archiver) fetchLoose(ctx context.Context, dec *zstd.Decoder, key string) fetched {
+	if a.mem != nil {
+		m, ok := a.mem[key]
+		if !ok {
+			return fetched{key: key, bad: errNotFound}
+		}
+		return fetched{key: key, raw: m.raw, ct: m.info.ContentType, etag: m.info.ETag, size: m.info.Size}
+	}
 	rc, info, err := a.st.Get(ctx, a.bucket, key)
 	if errors.Is(err, errNotFound) {
 		return fetched{key: key, bad: err}
@@ -438,7 +480,7 @@ func (a *archiver) fetchLoose(ctx context.Context, dec *zstd.Decoder, key string
 	if err != nil {
 		return fetched{key: key, bad: err}
 	}
-	return fetched{key: key, raw: raw, ct: info.ContentType, size: int64(len(stored))}
+	return fetched{key: key, raw: raw, ct: info.ContentType, etag: info.ETag, size: int64(len(stored))}
 }
 
 // verify reads the generation back from the bucket and checks every entry against the sha256

@@ -23,9 +23,10 @@ const (
 )
 
 type frameInfo struct {
-	Offset    int64 `json:"offset"`
-	Length    int64 `json:"length"`
-	RawLength int64 `json:"raw_length"`
+	Kind      string `json:"kind,omitempty"` // v2: frameText or frameBlob
+	Offset    int64  `json:"offset"`
+	Length    int64  `json:"length"`
+	RawLength int64  `json:"raw_length"`
 }
 
 type entry struct {
@@ -39,6 +40,13 @@ type entry struct {
 	StoredSize int64 `json:"stored_size"`
 	// ETag of the original object; a loose object with the same key and ETag is already in.
 	ETag string `json:"etag,omitempty"`
+
+	// v2 only. Length is then the stored middle part, not the entry.
+	Parent    int   `json:"parent"` // entry this one is a delta of, -1 for a keyframe
+	Prefix    int   `json:"prefix,omitempty"`
+	Suffix    int   `json:"suffix,omitempty"`
+	Literal   bool  `json:"literal,omitempty"` // holds a raw NUL, so no blob references
+	RawLength int64 `json:"raw_length,omitempty"`
 }
 
 type archiveIndex struct {
@@ -47,6 +55,7 @@ type archiveIndex struct {
 	Generation string      `json:"generation"`
 	WindowLog  int         `json:"window_log"`
 	Frames     []frameInfo `json:"frames"`
+	Blobs      []blobInfo  `json:"blobs,omitempty"`
 	Entries    []entry     `json:"entries"`
 
 	byKey map[string]int
@@ -109,8 +118,8 @@ func decodeIndex(b []byte) (*archiveIndex, error) {
 	if err := json.Unmarshal(raw, &ix); err != nil {
 		return nil, fmt.Errorf("index: %w", err)
 	}
-	if ix.Version != indexVersion {
-		return nil, fmt.Errorf("index: version %d, want %d", ix.Version, indexVersion)
+	if ix.Version != indexVersion && ix.Version != indexV2 {
+		return nil, fmt.Errorf("index: unknown version %d", ix.Version)
 	}
 	return &ix, nil
 }
