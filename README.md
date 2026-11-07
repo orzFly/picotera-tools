@@ -88,3 +88,7 @@ podman run --rm --network <network> \
 ```
 
 Keep rules files, channel maps and `--assign` / `--key-map` choices next to the binary on the host: they describe a deployment, not this tool.
+
+## License
+
+BSD 3-Clause, see `LICENSE`. `internal/picotera` mirrors code from PicoTera under its own BSD 3-Clause license (`internal/picotera/LICENSE`).
