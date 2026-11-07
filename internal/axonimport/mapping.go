@@ -81,7 +81,10 @@ type Mapper struct {
 	// ChannelProviders, when set, replaces matching channels to providers
 	// by name.
 	ChannelProviders map[int64]int32
-	Pico             *pgxpool.Pool // for key lookups
+	// ModelRenames rewrites the client-facing model name; upstream_model
+	// keeps what was actually sent.
+	ModelRenames map[string]string
+	Pico         *pgxpool.Pool // for key lookups
 }
 
 func wireFormat(axonFormat string) picotera.Format {
@@ -153,7 +156,7 @@ func (m *Mapper) Map(ctx context.Context, r *Request) (*Record, error) {
 		EndpointPath: ptr(clientPath(r)),
 		UserID:       m.UserID,
 		APIKeyID:     apiKey,
-		Model:        nonEmpty(r.ModelID),
+		Model:        nonEmpty(m.modelName(r.ModelID)),
 		TTFTMs:       r.TTFTMs,
 		TimeSpentMs:  r.LatencyMs,
 		FinishReason: finishReason(r.Status),
@@ -276,6 +279,13 @@ func (m *Mapper) Map(ctx context.Context, r *Request) (*Record, error) {
 		)
 	}
 	return rec, nil
+}
+
+func (m *Mapper) modelName(name string) string {
+	if to, ok := m.ModelRenames[name]; ok {
+		return to
+	}
+	return name
 }
 
 func (m *Mapper) provider(channelID *int64) *int64 {

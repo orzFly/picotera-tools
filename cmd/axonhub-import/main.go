@@ -137,6 +137,22 @@ func (k *keyMapFlag) Set(v string) error {
 	return nil
 }
 
+type renameFlag map[string]string
+
+func (r *renameFlag) String() string { return fmt.Sprint(map[string]string(*r)) }
+
+func (r *renameFlag) Set(v string) error {
+	from, to, ok := strings.Cut(v, "=")
+	if !ok || from == "" || to == "" {
+		return fmt.Errorf("want FROM=TO, got %q", v)
+	}
+	if *r == nil {
+		*r = renameFlag{}
+	}
+	(*r)[from] = to
+	return nil
+}
+
 type rootsFlag []string
 
 func (r *rootsFlag) String() string     { return strings.Join(*r, ",") }
@@ -199,6 +215,8 @@ func cmdImport(ctx context.Context, args []string) error {
 	projectMode := fs.String("projects", "match", "project resolution: off, match, autocreate")
 	sampleMod := fs.Int64("sample-mod", 0, "only requests whose id is divisible by this (dry-run spot checks)")
 	reportPath := fs.String("report", "", "also write the per-project report to this file")
+	var modelRenames renameFlag
+	fs.Var(&modelRenames, "model-rename", "FROM=TO: rename the requested model (repeatable); upstream_model is kept")
 	var keyMap keyMapFlag
 	fs.Var(&keyMap, "key-map", "AXONHUB_KEY_ID=PICOTERA_KEY_ID: label rows of that AxonHub key with an existing PicoTera key (repeatable); other keys get a disabled "+axonimport.ArchivedKeyPrefix+"<name> key")
 	channelMap := fs.String("channel-map", "", "file mapping AxonHub channels to PicoTera providers (see providers); default matches by name")
@@ -293,7 +311,7 @@ func cmdImport(ctx context.Context, args []string) error {
 
 	im := &axonimport.Importer{
 		Source:           src,
-		Mapper:           &axonimport.Mapper{UserID: c.userID, Channels: channels, Providers: providers, Projects: projects, Keys: keys, Pico: pico, ChannelProviders: channelProviders},
+		Mapper:           &axonimport.Mapper{UserID: c.userID, Channels: channels, Providers: providers, Projects: projects, Keys: keys, Pico: pico, ChannelProviders: channelProviders, ModelRenames: modelRenames},
 		Target:           target,
 		Batch:            c.batch,
 		Workers:          c.workers,
