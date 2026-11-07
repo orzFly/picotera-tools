@@ -5,6 +5,8 @@ Tools around [PicoTera](https://git.atto.town/oott123/picotera), an LLM gateway.
 - **Migrate from [AxonHub](https://github.com/looplj/axonhub)**: copy its request history into PicoTera, so old requests can be browsed, filtered and costed next to new ones.
 - **Tidy projects**: merge the fragments PicoTera's project auto-creation leaves behind, and re-sort requests a project swallowed by mistake.
 
+A second binary, `pt-store`, keeps the request artifacts small: it packs old days of the artifact bucket into compressed daily archives and serves the dashboard's reads of them, see [Archiving artifacts](#archiving-artifacts).
+
 Nothing is written unless you pass `--write`. Without it, the PicoTera connection runs with `default_transaction_read_only=on` and no S3 client exists; the AxonHub connection is always read-only.
 
 ## Setup
@@ -178,6 +180,36 @@ If a project ended up with a shallow path such as a home directory, every reposi
 4. Delete the emptied project in the dashboard.
 
 `docs/picotera-project-matching.md` describes how this happens and the changes PicoTera itself would need to prevent it.
+
+## Archiving artifacts
+
+PicoTera stores every request and response as its own zstd object, `artifacts/<UTC day>/<id>.{request,response}.json.zst`. Each request carries the whole conversation so far, screenshots included, so the bucket mostly holds the same bytes over and over, and per-object compression cannot see across objects. Packed by day, a bucket typically shrinks 40 to 100 times.
+
+`pt-store` has three commands:
+
+| Command | What it does |
+|---|---|
+| `pt-store archive` | Packs each day up to `--min-age-days` (2) old into `<archive bucket>/<day>/`, checks every entry back against its source, then moves the day's `CURRENT` to it. With `--delete` it then removes the loose objects that `CURRENT` holds with the same key and ETag; anything written or overwritten since is left for the next run. A day already packed is skipped; one that gained objects is packed again whole. |
+| `pt-store serve` | Sits between the dashboard and S3 for presigned artifact reads. It forwards them unchanged and, where S3 answers `NoSuchKey`, serves the entry from the archive. |
+| `pt-store get` | Prints one archived artifact, decompressed. |
+
+They read the same `PICOTERA_S3_*` variables as PicoTera; `--endpoint`, `--bucket` and the rest override them, and `--archive-bucket` is required. The key needs read and write on both buckets.
+
+An archive is a set of independent zstd frames of 1 GiB of raw entries each, with a 256 MiB window, plus an index; reading one entry decodes at most one frame. Unchanged entries keep their bytes exactly, and every entry is checked by SHA-256 when it is written and when it is read.
+
+### Serving reads
+
+The dashboard opens an artifact through a presigned URL. Point PicoTera's `PICOTERA_S3_PUBLIC_URL` at a path in front of `pt-store serve`, for example `https://dashboard.example.com/_artifacts`, strip that prefix on the way in, and give `serve` an `--upstream` that reaches S3 **with the same Host**: the signature covers the Host header, and `serve` passes it through untouched. A reverse proxy that routes `dashboard.example.com/<artifact bucket>/` to S3 does this; PicoTera's own writes can use the same route.
+
+`serve` lets through only `GET` and `HEAD` of `/<bucket>/artifacts/<day>/<file>` and refuses anything else itself, so the route to it can skip the dashboard's login without exposing the rest of S3. It falls back to the archive only on `NoSuchKey`, which S3 returns only after the signature checked out (MinIO names it in `X-Minio-Error-Code` for `HEAD` and in the XML body for `GET`); every other error passes through.
+
+Reads from the archive are cached in memory, including the entries next to the one asked for, since the dashboard tends to open neighbouring requests; the caches drop what has been idle for a minute.
+
+```sh
+pt-store serve --listen :9910 --upstream https://dashboard.example.com --archive-bucket picotera-archives
+pt-store archive --archive-bucket picotera-archives --delete     # daily, e.g. from a systemd timer
+pt-store get --archive-bucket picotera-archives artifacts/2026-01-10/<id>.request.json.zst
+```
 
 ## Reference
 
