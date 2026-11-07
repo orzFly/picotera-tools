@@ -20,6 +20,7 @@ type Stats struct {
 	Rows          atomic.Int64
 	Artifacts     atomic.Int64
 	ArtifactBytes atomic.Int64
+	Rewritten     atomic.Int64
 	ProjectHit    atomic.Int64
 	ProjectNew    atomic.Int64
 	ProjectMiss   atomic.Int64
@@ -39,6 +40,9 @@ type Importer struct {
 	SampleMod int64
 	Stats     Stats
 	Report    *ProjectReport
+	// RewriteResponses re-uploads the response artifacts of rows already
+	// imported, after the response format changed.
+	RewriteResponses bool
 	// Earliest is the oldest created_at written, where finalize's aggregate
 	// refresh has to start.
 	Earliest time.Time
@@ -105,6 +109,22 @@ func (im *Importer) runBatch(ctx context.Context, reqs []*Request) error {
 		im.Stats.Requests.Add(1)
 		if existing[rec.Rows[0].ID] {
 			im.Stats.Skipped.Add(1)
+			if !im.RewriteResponses {
+				continue
+			}
+			var resps []Artifact
+			for _, a := range rec.Artifacts {
+				if a.Response {
+					resps = append(resps, a)
+				}
+			}
+			g.Go(func() error {
+				if err := im.Target.PutArtifacts(gctx, resps); err != nil {
+					return err
+				}
+				im.Stats.Rewritten.Add(int64(len(resps)))
+				return nil
+			})
 			continue
 		}
 		im.Report.add(rec.Project, rec.Rows[0].CreatedAt)
@@ -140,8 +160,8 @@ func (im *Importer) runBatch(ctx context.Context, reqs []*Request) error {
 
 func (im *Importer) Summary(w io.Writer) {
 	s := &im.Stats
-	fmt.Fprintf(w, "requests %d (skipped %d), rows %d, artifacts %d, %.1f MiB compressed\n",
-		s.Requests.Load(), s.Skipped.Load(), s.Rows.Load(), s.Artifacts.Load(), float64(s.ArtifactBytes.Load())/(1<<20))
+	fmt.Fprintf(w, "requests %d (skipped %d), rows %d, artifacts %d, %.1f MiB compressed, %d response artifacts rewritten\n",
+		s.Requests.Load(), s.Skipped.Load(), s.Rows.Load(), s.Artifacts.Load(), float64(s.ArtifactBytes.Load())/(1<<20), s.Rewritten.Load())
 	fmt.Fprintf(w, "projects: matched %d, created %d, unmatched %d, no workspace path %d\n",
 		s.ProjectHit.Load(), s.ProjectNew.Load(), s.ProjectMiss.Load(), s.ProjectNone.Load())
 	if k := im.Mapper.Keys; k != nil {

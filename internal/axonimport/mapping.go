@@ -59,8 +59,9 @@ type Row struct {
 }
 
 type Artifact struct {
-	Key  string
-	Data []byte
+	Key      string
+	Data     []byte
+	Response bool
 }
 
 type Record struct {
@@ -209,7 +210,7 @@ func (m *Mapper) Map(ctx context.Context, r *Request) (*Record, error) {
 	}
 	rec.Artifacts = append(rec.Artifacts,
 		Artifact{Key: picotera.RequestKey(meta.ID, meta.CreatedAt), Data: reqArt},
-		Artifact{Key: picotera.ResponseKey(meta.ID, meta.CreatedAt), Data: respArt},
+		Artifact{Key: picotera.ResponseKey(meta.ID, meta.CreatedAt), Data: respArt, Response: true},
 	)
 
 	for i := range r.Executions {
@@ -266,7 +267,7 @@ func (m *Mapper) Map(ctx context.Context, r *Request) (*Record, error) {
 		}
 		rec.Artifacts = append(rec.Artifacts,
 			Artifact{Key: picotera.RequestKey(up.ID, up.CreatedAt), Data: reqArt},
-			Artifact{Key: picotera.ResponseKey(up.ID, up.CreatedAt), Data: respArt},
+			Artifact{Key: picotera.ResponseKey(up.ID, up.CreatedAt), Data: respArt, Response: true},
 		)
 	}
 	return rec, nil
@@ -383,13 +384,15 @@ func buildResponse(status *int64, stream bool, format picotera.Format, body []by
 		return picotera.BuildResponse(code, h, body, nil)
 	}
 	// AxonHub kept only the response it assembled from the stream, never the
-	// SSE events, which is exactly what PicoTera's aggregated field holds.
-	h.Set("Content-Type", "text/event-stream")
-	h.Set(ImportedHeader, "axonhub; stream events were not recorded, see aggregated")
+	// SSE events. It goes into the body as JSON as well as into aggregated:
+	// the dashboard opens responses on the JSON view and, for an SSE content
+	// type, falls back to Raw, which would show an empty body.
+	h.Set("Content-Type", "application/json")
+	h.Set(ImportedHeader, "axonhub; streamed, events were not recorded, body is the assembled response")
 	if format == picotera.FormatUnknown {
 		return picotera.BuildResponse(code, h, body, nil)
 	}
-	return picotera.BuildResponseWithAggregated(code, h, nil, &picotera.AggregatedResponse{
+	return picotera.BuildResponseWithAggregated(code, h, body, &picotera.AggregatedResponse{
 		Format:       string(format),
 		Body:         json.RawMessage(body),
 		BodyEncoding: "json",

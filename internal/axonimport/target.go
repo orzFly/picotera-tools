@@ -23,6 +23,9 @@ type Target interface {
 	// them without re-uploading artifacts.
 	Exists(ctx context.Context, rows []Row) (map[string]bool, error)
 	Write(ctx context.Context, rec *Record) error
+	// PutArtifacts uploads artifacts without touching rows, for rewriting
+	// the artifacts of rows an earlier run imported.
+	PutArtifacts(ctx context.Context, arts []Artifact) error
 }
 
 type Picotera struct {
@@ -84,8 +87,8 @@ func (p *Picotera) Exists(ctx context.Context, metas []Row) (map[string]bool, er
 // Write uploads artifacts before inserting rows: a row whose artifacts are
 // missing renders as broken, while orphaned artifacts from a crash are simply
 // overwritten by the next run.
-func (p *Picotera) Write(ctx context.Context, rec *Record) error {
-	for _, a := range rec.Artifacts {
+func (p *Picotera) PutArtifacts(ctx context.Context, arts []Artifact) error {
+	for _, a := range arts {
 		_, err := p.S3.PutObject(ctx, p.Bucket, a.Key, bytes.NewReader(a.Data), int64(len(a.Data)), minio.PutObjectOptions{
 			ContentType:          "application/json",
 			ContentEncoding:      "zstd",
@@ -94,6 +97,13 @@ func (p *Picotera) Write(ctx context.Context, rec *Record) error {
 		if err != nil {
 			return fmt.Errorf("put %s: %w", a.Key, err)
 		}
+	}
+	return nil
+}
+
+func (p *Picotera) Write(ctx context.Context, rec *Record) error {
+	if err := p.PutArtifacts(ctx, rec.Artifacts); err != nil {
+		return err
 	}
 	batch := &pgx.Batch{}
 	for _, r := range rec.Rows {
@@ -210,6 +220,8 @@ func NewDumpTarget(dir string) (*DumpTarget, error) {
 }
 
 func (d *DumpTarget) Exists(context.Context, []Row) (map[string]bool, error) { return nil, nil }
+
+func (d *DumpTarget) PutArtifacts(context.Context, []Artifact) error { return nil }
 
 func (d *DumpTarget) Write(_ context.Context, rec *Record) error {
 	if d.Dir == "" {

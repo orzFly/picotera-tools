@@ -193,6 +193,7 @@ func cmdImport(ctx context.Context, args []string) error {
 	reportPath := fs.String("report", "", "also write the per-project report to this file")
 	var keyMap keyMapFlag
 	fs.Var(&keyMap, "key-map", "AXONHUB_KEY_ID=PICOTERA_KEY_ID: label rows of that AxonHub key with an existing PicoTera key (repeatable); other keys get a disabled "+axonimport.ArchivedKeyPrefix+"<name> key")
+	rewriteResponses := fs.Bool("rewrite-responses", false, "re-upload the response artifacts of requests already imported")
 	incremental := fs.Bool("incremental", false, "start after the largest AxonHub request id already imported")
 	settle := fs.Duration("settle", 10*time.Minute, "skip requests newer than this; they may still be in flight")
 	_ = fs.Parse(args)
@@ -273,15 +274,16 @@ func cmdImport(ctx context.Context, args []string) error {
 	}
 
 	im := &axonimport.Importer{
-		Source:    src,
-		Mapper:    &axonimport.Mapper{UserID: c.userID, Channels: channels, Providers: providers, Projects: projects, Keys: keys, Pico: pico},
-		Target:    target,
-		Batch:     c.batch,
-		Workers:   c.workers,
-		AfterID:   c.afterID,
-		UntilID:   c.untilID,
-		Limit:     *limit,
-		SampleMod: *sampleMod,
+		Source:           src,
+		Mapper:           &axonimport.Mapper{UserID: c.userID, Channels: channels, Providers: providers, Projects: projects, Keys: keys, Pico: pico},
+		Target:           target,
+		Batch:            c.batch,
+		Workers:          c.workers,
+		AfterID:          c.afterID,
+		UntilID:          c.untilID,
+		Limit:            *limit,
+		SampleMod:        *sampleMod,
+		RewriteResponses: *rewriteResponses,
 	}
 	if *reportPath != "" {
 		im.Report = axonimport.NewProjectReport()

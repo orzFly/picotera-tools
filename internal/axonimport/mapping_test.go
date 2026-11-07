@@ -55,7 +55,7 @@ func TestStreamResponseUsesAggregated(t *testing.T) {
 	if err := json.Unmarshal(raw, &p); err != nil {
 		t.Fatal(err)
 	}
-	if p.Body != "" || p.Aggregated == nil || p.Aggregated.Format != "anthropicMessages" || p.Headers.Get("Content-Type") != "text/event-stream" {
+	if p.Body != string(body) || p.Aggregated == nil || p.Aggregated.Format != "anthropicMessages" || p.Headers.Get("Content-Type") != "application/json" {
 		t.Fatalf("unexpected payload %s", raw)
 	}
 }
