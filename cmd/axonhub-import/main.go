@@ -33,6 +33,8 @@ commands:
   finalize   upsert traces, project first/last seen, refresh aggregates (needs --write)
   reproject  re-resolve the project of rows in one PicoTera project from their
              request artifacts; dry-run unless --write
+  providers  create legacy providers for AxonHub channels per a channel map and
+             set provider_id on imported rows; dry-run unless --write
   costs      copy AxonHub's recorded costs onto requests imported without them;
              dry-run unless --write
   merge-projects
@@ -63,6 +65,8 @@ func main() {
 		err = cmdFinalize(ctx, os.Args[2:])
 	case "reproject":
 		err = cmdReproject(ctx, os.Args[2:])
+	case "providers":
+		err = cmdProviders(ctx, os.Args[2:])
 	case "costs":
 		err = cmdCosts(ctx, os.Args[2:])
 	case "merge-projects":
@@ -197,6 +201,7 @@ func cmdImport(ctx context.Context, args []string) error {
 	reportPath := fs.String("report", "", "also write the per-project report to this file")
 	var keyMap keyMapFlag
 	fs.Var(&keyMap, "key-map", "AXONHUB_KEY_ID=PICOTERA_KEY_ID: label rows of that AxonHub key with an existing PicoTera key (repeatable); other keys get a disabled "+axonimport.ArchivedKeyPrefix+"<name> key")
+	channelMap := fs.String("channel-map", "", "file mapping AxonHub channels to PicoTera providers (see providers); default matches by name")
 	rewriteResponses := fs.Bool("rewrite-responses", false, "re-upload the response artifacts of requests already imported")
 	incremental := fs.Bool("incremental", false, "start after the largest AxonHub request id already imported")
 	settle := fs.Duration("settle", 10*time.Minute, "skip requests newer than this; they may still be in flight")
@@ -255,6 +260,15 @@ func cmdImport(ctx context.Context, args []string) error {
 	}
 	c.applyAssign(projects)
 
+	var channelProviders map[int64]int32
+	if *channelMap != "" {
+		chmap, err := axonimport.ReadChannelMap(*channelMap)
+		if err != nil {
+			return err
+		}
+		channelProviders = axonimport.ResolveChannels(chmap, providerIDs(providers))
+	}
+
 	keyNames, err := axonimport.LoadAxonKeyNames(ctx, axon)
 	if err != nil {
 		return err
@@ -279,7 +293,7 @@ func cmdImport(ctx context.Context, args []string) error {
 
 	im := &axonimport.Importer{
 		Source:           src,
-		Mapper:           &axonimport.Mapper{UserID: c.userID, Channels: channels, Providers: providers, Projects: projects, Keys: keys, Pico: pico},
+		Mapper:           &axonimport.Mapper{UserID: c.userID, Channels: channels, Providers: providers, Projects: projects, Keys: keys, Pico: pico, ChannelProviders: channelProviders},
 		Target:           target,
 		Batch:            c.batch,
 		Workers:          c.workers,
@@ -383,6 +397,73 @@ func cmdReproject(ctx context.Context, args []string) error {
 	}
 	since := time.Now().AddDate(0, 0, -40)
 	return axonimport.RefreshProjects(ctx, pico, rp.ProjectID, rp.TargetProjects(), since)
+}
+
+func providerIDs(byName map[string]int64) map[string]int32 {
+	out := make(map[string]int32, len(byName))
+	for name, id := range byName {
+		out[name] = int32(id)
+	}
+	return out
+}
+
+func cmdProviders(ctx context.Context, args []string) error {
+	fs := flag.NewFlagSet("providers", flag.ExitOnError)
+	channelMap := fs.String("channel-map", "", "file of '<channel id> id <provider id>' / '<channel id> new <name>' lines (required)")
+	batch := fs.Int("batch", 1000, "rows per round trip")
+	write := fs.Bool("write", false, "create providers and update rows in the live PicoTera database")
+	_ = fs.Parse(args)
+	if *channelMap == "" {
+		return errors.New("--channel-map is required")
+	}
+	chmap, err := axonimport.ReadChannelMap(*channelMap)
+	if err != nil {
+		return err
+	}
+	axon, pico, err := connect(ctx, *write)
+	if err != nil {
+		return err
+	}
+	defer axon.Close()
+	defer pico.Close()
+
+	channels, err := axonimport.LoadAxonChannels(ctx, axon)
+	if err != nil {
+		return err
+	}
+	for id := range channels {
+		if _, ok := chmap[id]; !ok {
+			fmt.Fprintf(os.Stderr, "warning: channel #%d %s is not in the map\n", id, channels[id].Name)
+		}
+	}
+	byName, err := axonimport.LoadProviders(ctx, pico)
+	if err != nil {
+		return err
+	}
+	existing := providerIDs(byName)
+	plans := axonimport.PlanLegacyProviders(chmap, channels)
+	axonimport.ShowLegacyProviders(os.Stdout, plans, existing)
+	if *write {
+		if err := axonimport.EnsureLegacyProviders(ctx, pico, plans, existing); err != nil {
+			return err
+		}
+	}
+	src := axonimport.NewSource(axon)
+	until, err := src.MaxID(ctx)
+	if err != nil {
+		return err
+	}
+	b := &axonimport.BackfillProviders{Axon: axon, Pico: pico, Channels: axonimport.ResolveChannels(chmap, existing), Batch: *batch, UntilID: until, Write: *write}
+	err = b.Run(ctx)
+	verb := "would update"
+	if *write {
+		verb = "updated"
+	}
+	fmt.Fprintf(os.Stderr, "%s provider_id on %d rows\n", verb, b.Rows)
+	if err != nil || !*write || b.Rows == 0 {
+		return err
+	}
+	return axonimport.RefreshOverview(ctx, pico, time.Date(2026, 1, 1, 0, 0, 0, 0, time.UTC))
 }
 
 func cmdCosts(ctx context.Context, args []string) error {

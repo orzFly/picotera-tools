@@ -78,7 +78,10 @@ type Mapper struct {
 	Providers map[string]int64
 	Projects  *Projects
 	Keys      *Keys
-	Pico      *pgxpool.Pool // for key lookups
+	// ChannelProviders, when set, replaces matching channels to providers
+	// by name.
+	ChannelProviders map[int64]int32
+	Pico             *pgxpool.Pool // for key lookups
 }
 
 func wireFormat(axonFormat string) picotera.Format {
@@ -277,6 +280,13 @@ func (m *Mapper) Map(ctx context.Context, r *Request) (*Record, error) {
 
 func (m *Mapper) provider(channelID *int64) *int64 {
 	if channelID == nil {
+		return nil
+	}
+	if m.ChannelProviders != nil {
+		if id, ok := m.ChannelProviders[*channelID]; ok {
+			v := int64(id)
+			return &v
+		}
 		return nil
 	}
 	if id, ok := m.Providers[m.Channels[*channelID]]; ok {
