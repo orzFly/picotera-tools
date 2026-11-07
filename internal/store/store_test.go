@@ -578,3 +578,32 @@ func TestDeleteOnlyWhatTheIndexCovers(t *testing.T) {
 		t.Fatal("an object written after archiving was deleted")
 	}
 }
+
+// Each day's loose objects go as soon as its grace has passed, while later days are still being
+// packed, not all at the end of the run.
+func TestDeletionFollowsTheRun(t *testing.T) {
+	ctx := context.Background()
+	st := newMemStore()
+	seed(t, st, "2026-01-08", 5, 21)
+	seed(t, st, "2026-01-09", 5, 22)
+	a := newTestArchiver(st, true)
+	var mu sync.Mutex // onGet runs on the prefetch goroutines
+	firstDayLeftWhenSecondStarted := -1
+	a.st = &hookStore{memStore: st, onGet: func(key string) {
+		mu.Lock()
+		defer mu.Unlock()
+		if strings.Contains(key, "/2026-01-09/") && firstDayLeftWhenSecondStarted < 0 {
+			objs, _ := st.List(ctx, testBucket, "artifacts/2026-01-08/")
+			firstDayLeftWhenSecondStarted = len(objs)
+		}
+	}}
+	if err := a.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	if firstDayLeftWhenSecondStarted != 0 {
+		t.Fatalf("the first day still had %d loose objects when the second was packed", firstDayLeftWhenSecondStarted)
+	}
+	if objs, _ := st.List(ctx, testBucket, "artifacts/2026-01-09/"); len(objs) != 0 {
+		t.Fatalf("the last day kept %d loose objects", len(objs))
+	}
+}
