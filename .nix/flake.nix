@@ -22,6 +22,7 @@
               pkgs.nixpkgs-fmt
               pkgs.go
               pkgs.gopls
+              pkgs.git-filter-repo
             ];
             commands = [
               {
