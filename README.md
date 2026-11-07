@@ -43,8 +43,4 @@ ssh host /srv/picotera-tools/run.sh projects
 
 ### Deployment data
 
-`runs/import.args` holds the one-off routing decided for that import (`--assign` to existing projects, `--root` for repositories whose first request came from a subdirectory). Pass it to `projects` and `import` alike:
-
-```sh
-ssh host 'cd /srv/picotera-tools && ./run.sh import $(cat import.args) --projects autocreate'
-```
+One-off routing (`--assign`, `--root`, `--key-map`) and the channel map for `providers` / `import --channel-map` are decisions about a particular deployment. Keep them next to the binary on the host, not in this repository, and pass them with `$(cat <file>)` / `--channel-map <file>`.
