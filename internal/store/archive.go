@@ -33,8 +33,11 @@ type archiver struct {
 	// mem, when set, holds the entries convert read out of a v1 generation, each zstd-compressed
 	// on its own; they stand in for loose objects.
 	mem map[string]memEntry
-	now func() time.Time
-	log *slog.Logger
+	// upgrade rewrites every archived day whose format is older than format, merging any loose
+	// objects it has; older generations are read whole into memory, so run it where that fits.
+	upgrade bool
+	now     func() time.Time
+	log     *slog.Logger
 }
 
 type dayStatus struct {
@@ -89,37 +92,54 @@ func (a *archiver) run(ctx context.Context) error {
 		if err != nil {
 			return fmt.Errorf("list %s: %w", d, err)
 		}
-		if len(loose) == 0 {
+		upgrade := false
+		if a.upgrade {
+			if upgrade, err = a.outdated(ctx, d); err != nil {
+				rs.Days = append(rs.Days, dayStatus{Day: d, LooseObjects: len(loose), Error: err.Error()})
+				failed = append(failed, d)
+				continue
+			}
+		}
+		if len(loose) == 0 && !upgrade {
 			continue
 		}
 		// Until --delete is on, every day keeps its loose objects; without this check each run
 		// would repack every day ever archived.
-		if ds, ok, err := a.upToDate(ctx, d, loose); err != nil {
-			rs.Days = append(rs.Days, dayStatus{Day: d, LooseObjects: len(loose), Error: err.Error()})
-			failed = append(failed, d)
-			continue
-		} else if ok {
-			rs.Days = append(rs.Days, ds)
-			a.log.Info("already archived", "day", d, "generation", ds.Generation, "loose_objects", len(loose))
-			if a.del && !a.dryRun {
-				deleteDay(len(rs.Days) - 1)
-			}
-		} else if a.dryRun {
-			a.log.Info("would archive", "day", d, "loose_objects", len(loose))
-			rs.Days = append(rs.Days, dayStatus{Day: d, LooseObjects: len(loose)})
-			continue
-		} else {
-			ds, _ := a.archiveAny(ctx, d, gen, loose)
-			rs.Days = append(rs.Days, ds)
-			if ds.Error != "" {
+		var current bool
+		if !upgrade {
+			ds, ok, err := a.upToDate(ctx, d, loose)
+			if err != nil {
+				rs.Days = append(rs.Days, dayStatus{Day: d, LooseObjects: len(loose), Error: err.Error()})
 				failed = append(failed, d)
-				a.log.Error("day failed", "day", d, "err", ds.Error)
 				continue
 			}
-			a.log.Info("archived", "day", d, "entries", ds.Entries, "ratio", fmt.Sprintf("%.1f", ds.Ratio), "seconds", int(ds.Seconds))
-			if a.del {
-				deleteDay(len(rs.Days) - 1)
+			if ok {
+				current = true
+				rs.Days = append(rs.Days, ds)
+				a.log.Info("already archived", "day", d, "generation", ds.Generation, "loose_objects", len(loose))
+				if a.del && !a.dryRun {
+					deleteDay(len(rs.Days) - 1)
+				}
 			}
+		}
+		if current {
+			continue
+		}
+		if a.dryRun {
+			a.log.Info("would archive", "day", d, "loose_objects", len(loose), "upgrade", upgrade)
+			rs.Days = append(rs.Days, dayStatus{Day: d, LooseObjects: len(loose)})
+			continue
+		}
+		ds, _ := a.archiveAny(ctx, d, gen, loose)
+		rs.Days = append(rs.Days, ds)
+		if ds.Error != "" {
+			failed = append(failed, d)
+			a.log.Error("day failed", "day", d, "err", ds.Error)
+			continue
+		}
+		a.log.Info("archived", "day", d, "entries", ds.Entries, "ratio", fmt.Sprintf("%.1f", ds.Ratio), "seconds", int(ds.Seconds))
+		if a.del {
+			deleteDay(len(rs.Days) - 1)
 		}
 	}
 	if a.dryRun {
@@ -152,8 +172,38 @@ func (a *archiver) days(ctx context.Context, now time.Time) ([]string, error) {
 			days = append(days, d)
 		}
 	}
+	if a.upgrade {
+		// Days with nothing loose do not show up in the artifact bucket; their archives do.
+		archived, err := a.st.ListPrefixes(ctx, a.archBucket, "")
+		if err != nil {
+			return nil, err
+		}
+		seen := map[string]bool{}
+		for _, d := range days {
+			seen[d] = true
+		}
+		for _, p := range archived {
+			d := strings.TrimSuffix(p, "/")
+			if _, err := time.Parse("2006-01-02", d); err == nil && d <= cutoff && !seen[d] {
+				days = append(days, d)
+			}
+		}
+	}
 	sort.Strings(days)
 	return days, nil
+}
+
+// outdated says whether day's CURRENT is in a format older than the one being written.
+func (a *archiver) outdated(ctx context.Context, day string) (bool, error) {
+	cur, err := readCurrent(ctx, a.st, a.archBucket, day)
+	if err != nil || cur == "" {
+		return false, err
+	}
+	ix, err := readIndex(ctx, a.st, a.archBucket, day, cur)
+	if err != nil {
+		return false, err
+	}
+	return a.format == "v2" && ix.Version < indexV2, nil
 }
 
 // archiveAny picks the format: v2 when asked for and the day is new or already v2. A v1 day keeps
@@ -173,10 +223,41 @@ func (a *archiver) archiveAny(ctx context.Context, day, gen string, loose []obje
 			return dayStatus{Day: day, LooseObjects: len(loose), Error: err.Error()}, nil
 		}
 		if old.Version != indexV2 {
+			if a.upgrade {
+				return a.upgradeDay(ctx, day, gen, loose, cur, old)
+			}
 			return a.archiveDay(ctx, day, gen, loose)
 		}
 	}
 	return a.archiveDayV2(ctx, day, gen, loose, cur, old)
+}
+
+// upgradeDay rewrites a v1 day as v2: the v1 generation is read into memory and its entries
+// stand in for loose objects next to the real ones, a real loose object winning over an
+// archived entry of the same key.
+func (a *archiver) upgradeDay(ctx context.Context, day, gen string, loose []objectInfo, cur string, old *archiveIndex) (dayStatus, []string) {
+	mem, entries, err := loadV1(ctx, a.st, a.archBucket, day, cur, old)
+	if err != nil {
+		return dayStatus{Day: day, LooseObjects: len(loose), Error: err.Error()}, nil
+	}
+	inLoose := make(map[string]bool, len(loose))
+	for _, o := range loose {
+		inLoose[o.Key] = true
+	}
+	items := append([]objectInfo(nil), loose...)
+	for _, e := range entries {
+		if inLoose[e.Key] {
+			delete(mem, e.Key)
+			continue
+		}
+		items = append(items, e)
+	}
+	sort.Slice(items, func(i, j int) bool { return items[i].Key < items[j].Key })
+	a.mem = mem
+	defer func() { a.mem = nil }()
+	ds, keys := a.archiveDayV2(ctx, day, gen, items, "", nil)
+	ds.LooseObjects = len(loose)
+	return ds, keys
 }
 
 type mergeItem struct {
@@ -438,11 +519,7 @@ type memEntry struct {
 }
 
 func (a *archiver) fetchLoose(ctx context.Context, dec *zstd.Decoder, key string) fetched {
-	if a.mem != nil {
-		m, ok := a.mem[key]
-		if !ok {
-			return fetched{key: key, bad: errNotFound}
-		}
+	if m, ok := a.mem[key]; ok {
 		raw, err := dec.DecodeAll(m.comp, nil)
 		if err != nil {
 			return fetched{key: key, err: fmt.Errorf("%s: %w", key, err)}

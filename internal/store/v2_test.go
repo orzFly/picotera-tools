@@ -306,3 +306,57 @@ func TestV2PairShareOneDecode(t *testing.T) {
 		t.Fatalf("%d decodes, want 1", n)
 	}
 }
+
+func TestUpgradeRewritesV1Days(t *testing.T) {
+	ctx := context.Background()
+	st := newMemStore()
+	// Two v1 days, all loose objects gone; one then gets a backdated write.
+	wantA := v2Day(t, st, "2026-01-08", 3, 8, 41)
+	wantB := v2Day(t, st, "2026-01-09", 3, 8, 42)
+	if err := newTestArchiver(st, true).run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	v1A, _ := readCurrent(ctx, st, testArch, "2026-01-08")
+	v1B, _ := readCurrent(ctx, st, testArch, "2026-01-09")
+	late := "artifacts/2026-01-09/zz.request.json.zst"
+	wantB[late] = []byte(`{"late":true}`)
+	st.Put(ctx, testBucket, late, bytes.NewReader(zstdObject(t, wantB[late])), -1, "application/json")
+
+	a := newV2Archiver(st, true)
+	a.upgrade = true
+	a.now = func() time.Time { return time.Date(2026, 1, 20, 4, 0, 0, 0, time.UTC) }
+	if err := a.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	for day, want := range map[string]map[string][]byte{"2026-01-08": wantA, "2026-01-09": wantB} {
+		ix, get := readAllV2(t, st, day)
+		if ix.Version != indexV2 || len(ix.Entries) != len(want) {
+			t.Fatalf("%s: version %d, %d entries, want %d", day, ix.Version, len(ix.Entries), len(want))
+		}
+		for k, b := range want {
+			if !bytes.Equal(get(k), b) {
+				t.Fatalf("%s differs after upgrade", k)
+			}
+		}
+	}
+	for day, gen := range map[string]string{"2026-01-08": v1A, "2026-01-09": v1B} {
+		if st.has(testArch, dataKey(day, gen)) {
+			t.Fatalf("%s: the v1 generation outlived the upgrade", day)
+		}
+	}
+	if st.has(testBucket, late) {
+		t.Fatal("the backdated object merged by the upgrade was not deleted")
+	}
+
+	// A second upgrade has nothing left to do.
+	before := len(st.objects)
+	a.now = func() time.Time { return time.Date(2026, 1, 21, 4, 0, 0, 0, time.UTC) }
+	if err := a.run(ctx); err != nil {
+		t.Fatal(err)
+	}
+	gA, _ := readCurrent(ctx, st, testArch, "2026-01-08")
+	if ix, _ := readIndex(ctx, st, testArch, "2026-01-08", gA); ix.Generation == "20260121T040000Z" || len(st.objects) != before+0 {
+		// _status.json is rewritten in place, so the object count stays the same
+		t.Fatalf("a second upgrade rewrote a v2 day (generation %s)", ix.Generation)
+	}
+}

@@ -195,6 +195,7 @@ func cmdArchive(ctx context.Context, args []string, log *slog.Logger) error {
 	fs.BoolVar(&a.del, "delete", false, "delete loose objects the archive holds with the same key and ETag")
 	fs.BoolVar(&a.dryRun, "dry-run", false, "list the days that would be archived")
 	fs.IntVar(&a.fetchers, "fetchers", 8, "loose objects downloaded at once")
+	fs.BoolVar(&a.upgrade, "upgrade", false, "also rewrite every archived day stored in an older format (holds a day in memory)")
 	fs.StringVar(&a.format, "format", "v2", "archive format for new days: v2, or v1 for the older layout")
 	fs.Parse(args)
 	if a.format != "v1" && a.format != "v2" {

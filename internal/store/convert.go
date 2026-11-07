@@ -46,22 +46,40 @@ func convertDay(ctx context.Context, st store, bucket, archBucket, outBucket, da
 	}
 
 	t0 := time.Now()
-	mem := make(map[string]memEntry, len(ix.Entries))
-	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	mem, entries, err := loadV1(ctx, st, archBucket, day, cur, ix)
 	if err != nil {
 		return dayStatus{}, err
 	}
-	defer enc.Close()
+	log.Info("loaded v1 generation", "day", day, "entries", len(entries), "seconds", int(time.Since(t0).Seconds()))
+
+	a := &archiver{st: st, bucket: bucket, archBucket: outBucket, format: "v2", windowLog: defaultWindowLog,
+		level: zstd.SpeedBestCompression, fetchers: 8, now: now, log: log, mem: mem}
+	ds, _ := a.archiveDayV2(ctx, day, generationNow(now()), entries, "", nil)
+	if ds.Error != "" {
+		return ds, errors.New(ds.Error)
+	}
+	return ds, nil
+}
+
+// loadV1 reads a whole v1 generation into memory, each entry checked against its sha256 and
+// kept zstd-compressed on its own, so a day costs about the size of its original objects.
+func loadV1(ctx context.Context, st store, archBucket, day, cur string, ix *archiveIndex) (map[string]memEntry, []objectInfo, error) {
+	mem := make(map[string]memEntry, len(ix.Entries))
 	entries := make([]objectInfo, 0, len(ix.Entries))
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	if err != nil {
+		return nil, nil, err
+	}
+	defer enc.Close()
 	dec, err := newFrameDecoder(ix.WindowLog)
 	if err != nil {
-		return dayStatus{}, err
+		return nil, nil, err
 	}
 	defer dec.Close()
 	for fi, fr := range ix.Frames {
 		rc, err := st.GetRange(ctx, archBucket, dataKey(day, cur), fr.Offset, fr.Length)
 		if err != nil {
-			return dayStatus{}, err
+			return nil, nil, err
 		}
 		err = walkFrame(dec, rc, ix, fi, func(i int, raw []byte) (bool, error) {
 			e := &ix.Entries[i]
@@ -75,18 +93,10 @@ func convertDay(ctx context.Context, st store, bucket, archBucket, outBucket, da
 		})
 		rc.Close()
 		if err != nil {
-			return dayStatus{}, fmt.Errorf("%s frame %d: %w", day, fi, err)
+			return nil, nil, fmt.Errorf("%s frame %d: %w", day, fi, err)
 		}
 	}
-	log.Info("loaded v1 generation", "day", day, "entries", len(entries), "seconds", int(time.Since(t0).Seconds()))
-
-	a := &archiver{st: st, bucket: bucket, archBucket: outBucket, format: "v2", windowLog: defaultWindowLog,
-		level: zstd.SpeedBestCompression, fetchers: 8, now: now, log: log, mem: mem}
-	ds, _ := a.archiveDayV2(ctx, day, generationNow(now()), entries, "", nil)
-	if ds.Error != "" {
-		return ds, errors.New(ds.Error)
-	}
-	return ds, nil
+	return mem, entries, nil
 }
 
 type dayList []string
