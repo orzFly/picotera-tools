@@ -105,12 +105,12 @@ func (p *Picotera) Write(ctx context.Context, rec *Record) error {
 			usage = string(r.UsageRaw)
 		}
 		batch.Queue(`
-			INSERT INTO request (id, created_at, span_id, parent_span_id, type, provider_id, endpoint_path, user_id, project_id,
+			INSERT INTO request (id, created_at, span_id, parent_span_id, type, provider_id, endpoint_path, user_id, api_key_id, project_id,
 			  model, upstream_model, input_tokens, cache_read_tokens, output_tokens, cache_write_tokens, cache_write_1h_tokens,
 			  status_code, error_message, ttft_ms, time_spent_ms, finish_reason, user_message_preview, annotations, usage_raw)
-			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23::jsonb,$24::jsonb)
+			VALUES ($1,$2,$3,$4,$5,$6,$7,$8,$9,$10,$11,$12,$13,$14,$15,$16,$17,$18,$19,$20,$21,$22,$23,$24::jsonb,$25::jsonb)
 			ON CONFLICT (id, created_at) DO NOTHING`,
-			r.ID, r.CreatedAt, r.SpanID, r.ParentSpanID, r.Type, r.ProviderID, r.EndpointPath, r.UserID, r.ProjectID,
+			r.ID, r.CreatedAt, r.SpanID, r.ParentSpanID, r.Type, r.ProviderID, r.EndpointPath, r.UserID, r.APIKeyID, r.ProjectID,
 			r.Model, r.UpstreamModel, r.InputTokens, r.CacheReadTokens, r.OutputTokens, r.CacheWriteTokens, r.CacheWrite1hTokens,
 			r.StatusCode, r.ErrorMessage, r.TTFTMs, r.TimeSpentMs, r.FinishReason, r.UserMessagePreview, string(ann), usage)
 	}
@@ -245,4 +245,14 @@ func (d *DumpTarget) Write(_ context.Context, rec *Record) error {
 		}
 	}
 	return nil
+}
+
+// ImportedHighWater is the largest AxonHub request id already in PicoTera,
+// the starting point of an incremental run.
+func ImportedHighWater(ctx context.Context, db *pgxpool.Pool, userID int64) (int64, error) {
+	var id int64
+	err := db.QueryRow(ctx, `
+		SELECT COALESCE(max((annotations->>'axonhub_request_id')::bigint), 0)
+		FROM request WHERE annotations @> '{"source":"axonhub"}' AND type = 0 AND user_id = $1`, userID).Scan(&id)
+	return id, err
 }

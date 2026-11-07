@@ -39,6 +39,10 @@ type Importer struct {
 	SampleMod int64
 	Stats     Stats
 	Report    *ProjectReport
+	// Earliest is the oldest created_at written, where finalize's aggregate
+	// refresh has to start.
+	Earliest time.Time
+	earlyMu  sync.Mutex
 }
 
 func (im *Importer) Run(ctx context.Context) error {
@@ -119,6 +123,11 @@ func (im *Importer) runBatch(ctx context.Context, reqs []*Request) error {
 				return err
 			}
 			im.Stats.Rows.Add(int64(len(rec.Rows)))
+			im.earlyMu.Lock()
+			if im.Earliest.IsZero() || rec.Rows[0].CreatedAt.Before(im.Earliest) {
+				im.Earliest = rec.Rows[0].CreatedAt
+			}
+			im.earlyMu.Unlock()
 			im.Stats.Artifacts.Add(int64(len(rec.Artifacts)))
 			for _, a := range rec.Artifacts {
 				im.Stats.ArtifactBytes.Add(int64(len(a.Data)))
@@ -135,6 +144,9 @@ func (im *Importer) Summary(w io.Writer) {
 		s.Requests.Load(), s.Skipped.Load(), s.Rows.Load(), s.Artifacts.Load(), float64(s.ArtifactBytes.Load())/(1<<20))
 	fmt.Fprintf(w, "projects: matched %d, created %d, unmatched %d, no workspace path %d\n",
 		s.ProjectHit.Load(), s.ProjectNew.Load(), s.ProjectMiss.Load(), s.ProjectNone.Load())
+	if k := im.Mapper.Keys; k != nil {
+		fmt.Fprintf(w, "api keys: %d archived keys created\n", k.Created.Load())
+	}
 }
 
 // ProjectReport tallies, without writing anything, which existing project

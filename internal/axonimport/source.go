@@ -22,6 +22,7 @@ type Request struct {
 	TTFTMs         *int64
 	ChannelID      *int64
 	TraceID        *string
+	APIKeyID       *int64
 
 	Executions []Execution
 	Usage      *Usage
@@ -86,7 +87,7 @@ func (s *Source) Batch(ctx context.Context, afterID, untilID int64, limit int, s
 	rows, err := s.pool.Query(ctx, `
 		SELECT r.id, r.created_at, r.model_id, r.format, r.stream, r.status,
 		       r.request_headers, r.request_body, r.response_body,
-		       r.metrics_latency_ms, r.metrics_first_token_latency_ms, r.channel_id, t.trace_id
+		       r.metrics_latency_ms, r.metrics_first_token_latency_ms, r.channel_id, t.trace_id, r.api_key_id
 		FROM requests r LEFT JOIN traces t ON t.id = r.trace_id
 		WHERE r.id > $1 AND r.id <= $2 AND ($4::bigint = 0 OR r.id % $4::bigint = 0)
 		ORDER BY r.id
@@ -100,7 +101,7 @@ func (s *Source) Batch(ctx context.Context, afterID, untilID int64, limit int, s
 		r := &Request{}
 		if err := rows.Scan(&r.ID, &r.CreatedAt, &r.ModelID, &r.Format, &r.Stream, &r.Status,
 			&r.RequestHeaders, &r.RequestBody, &r.ResponseBody,
-			&r.LatencyMs, &r.TTFTMs, &r.ChannelID, &r.TraceID); err != nil {
+			&r.LatencyMs, &r.TTFTMs, &r.ChannelID, &r.TraceID, &r.APIKeyID); err != nil {
 			rows.Close()
 			return nil, fmt.Errorf("scan request: %w", err)
 		}
@@ -206,4 +207,18 @@ func (s *Source) Bodies(ctx context.Context, afterID, untilID int64, limit int, 
 		out = append(out, b)
 	}
 	return out, rows.Err()
+}
+
+// SafeUntil is the newest request id an incremental run may import: older
+// than settle, and before any request still in flight. Pending rows older
+// than an hour are ones AxonHub never closed, imported as failed.
+func (s *Source) SafeUntil(ctx context.Context, settle time.Duration) (int64, error) {
+	var id int64
+	err := s.pool.QueryRow(ctx, `
+		SELECT LEAST(
+		  COALESCE((SELECT max(id) FROM requests WHERE created_at < now() - $1::interval), 0),
+		  COALESCE((SELECT min(id) - 1 FROM requests
+		            WHERE status IN ('pending', 'processing') AND created_at > now() - interval '1 hour'), 9223372036854775807))`,
+		settle.String()).Scan(&id)
+	return id, err
 }

@@ -9,6 +9,8 @@ import (
 	"strings"
 	"time"
 
+	"github.com/jackc/pgx/v5/pgxpool"
+
 	"github.com/orzfly/picotera-tools/internal/picotera"
 )
 
@@ -36,6 +38,7 @@ type Row struct {
 	ProviderID         *int64
 	EndpointPath       *string
 	UserID             int64
+	APIKeyID           *int32
 	ProjectID          *int32
 	ProjectName        string `json:",omitempty"`
 	Model              *string
@@ -71,6 +74,8 @@ type Mapper struct {
 	Channels  map[int64]string
 	Providers map[string]int64
 	Projects  *Projects
+	Keys      *Keys
+	Pico      *pgxpool.Pool // for key lookups
 }
 
 func wireFormat(axonFormat string) picotera.Format {
@@ -126,6 +131,12 @@ func (m *Mapper) Map(ctx context.Context, r *Request) (*Record, error) {
 	if err != nil {
 		return nil, err
 	}
+	var apiKey *int32
+	if m.Keys != nil {
+		if apiKey, err = m.Keys.Resolve(ctx, m.Pico, r.APIKeyID); err != nil {
+			return nil, err
+		}
+	}
 	meta := Row{
 		ID:           metaID.String(),
 		CreatedAt:    metaID.Time().UTC(),
@@ -135,6 +146,7 @@ func (m *Mapper) Map(ctx context.Context, r *Request) (*Record, error) {
 		ProviderID:   m.provider(r.ChannelID),
 		EndpointPath: ptr(clientPath(r)),
 		UserID:       m.UserID,
+		APIKeyID:     apiKey,
 		Model:        nonEmpty(r.ModelID),
 		TTFTMs:       r.TTFTMs,
 		TimeSpentMs:  r.LatencyMs,
@@ -215,6 +227,7 @@ func (m *Mapper) Map(ctx context.Context, r *Request) (*Record, error) {
 			ProviderID:    m.provider(e.ChannelID),
 			EndpointPath:  urlPath(e.RequestURL, formatPath(e.Format, e.ModelID, e.Stream)),
 			UserID:        m.UserID,
+			APIKeyID:      apiKey,
 			ProjectID:     meta.ProjectID,
 			ProjectName:   meta.ProjectName,
 			Model:         meta.Model,

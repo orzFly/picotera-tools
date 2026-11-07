@@ -111,6 +111,24 @@ func (a *assignFlag) Set(v string) error {
 	return nil
 }
 
+type keyMapFlag map[int64]int32
+
+func (k *keyMapFlag) String() string { return fmt.Sprint(map[int64]int32(*k)) }
+
+func (k *keyMapFlag) Set(v string) error {
+	a, b, ok := strings.Cut(v, "=")
+	from, err1 := strconv.ParseInt(a, 10, 64)
+	to, err2 := strconv.ParseInt(b, 10, 32)
+	if !ok || err1 != nil || err2 != nil || from <= 0 || to <= 0 {
+		return fmt.Errorf("want AXONHUB_KEY_ID=PICOTERA_KEY_ID, got %q", v)
+	}
+	if *k == nil {
+		*k = keyMapFlag{}
+	}
+	(*k)[from] = int32(to)
+	return nil
+}
+
 type rootsFlag []string
 
 func (r *rootsFlag) String() string     { return strings.Join(*r, ",") }
@@ -173,6 +191,10 @@ func cmdImport(ctx context.Context, args []string) error {
 	projectMode := fs.String("projects", "match", "project resolution: off, match, autocreate")
 	sampleMod := fs.Int64("sample-mod", 0, "only requests whose id is divisible by this (dry-run spot checks)")
 	reportPath := fs.String("report", "", "also write the per-project report to this file")
+	var keyMap keyMapFlag
+	fs.Var(&keyMap, "key-map", "AXONHUB_KEY_ID=PICOTERA_KEY_ID: label rows of that AxonHub key with an existing PicoTera key (repeatable); other keys get a disabled "+axonimport.ArchivedKeyPrefix+"<name> key")
+	incremental := fs.Bool("incremental", false, "start after the largest AxonHub request id already imported")
+	settle := fs.Duration("settle", 10*time.Minute, "skip requests newer than this; they may still be in flight")
 	_ = fs.Parse(args)
 
 	mode := axonimport.ProjectMode(*projectMode)
@@ -193,8 +215,25 @@ func cmdImport(ctx context.Context, args []string) error {
 	defer axon.Close()
 	defer pico.Close()
 	src := axonimport.NewSource(axon)
-	if err := resolveUntil(ctx, src, &c); err != nil {
-		return err
+	if c.untilID == 0 {
+		if c.untilID, err = src.SafeUntil(ctx, *settle); err != nil {
+			return err
+		}
+	}
+	if *incremental {
+		hw, err := axonimport.ImportedHighWater(ctx, pico, c.userID)
+		if err != nil {
+			return err
+		}
+		// Requests within a batch are written concurrently, so a crash can
+		// leave holes just below the high-water mark; re-scanning a margin is
+		// cheap because existing rows are skipped.
+		c.afterID = max(c.afterID, hw-1000)
+	}
+	log.Printf("importing axonhub requests in (%d, %d]", c.afterID, c.untilID)
+	if c.afterID >= c.untilID {
+		log.Print("nothing new to import")
+		return nil
 	}
 
 	channels, err := src.Channels(ctx)
@@ -211,8 +250,15 @@ func cmdImport(ctx context.Context, args []string) error {
 	}
 	c.applyAssign(projects)
 
+	keyNames, err := axonimport.LoadAxonKeyNames(ctx, axon)
+	if err != nil {
+		return err
+	}
+	keys := &axonimport.Keys{UserID: c.userID, Map: keyMap, Names: keyNames}
+
 	var target axonimport.Target
 	if *write {
+		keys.DB = pico
 		s3, bucket, err := s3Client()
 		if err != nil {
 			return err
@@ -228,7 +274,7 @@ func cmdImport(ctx context.Context, args []string) error {
 
 	im := &axonimport.Importer{
 		Source:    src,
-		Mapper:    &axonimport.Mapper{UserID: c.userID, Channels: channels, Providers: providers, Projects: projects},
+		Mapper:    &axonimport.Mapper{UserID: c.userID, Channels: channels, Providers: providers, Projects: projects, Keys: keys, Pico: pico},
 		Target:    target,
 		Batch:     c.batch,
 		Workers:   c.workers,
@@ -252,7 +298,10 @@ func cmdImport(ctx context.Context, args []string) error {
 			return errors.Join(err, ferr)
 		}
 	}
-	return err
+	if err != nil || !*write || im.Stats.Rows.Load() == 0 {
+		return err
+	}
+	return axonimport.Finalize(ctx, pico, c.userID, im.Earliest)
 }
 
 func cmdFinalize(ctx context.Context, args []string) error {
