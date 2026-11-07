@@ -1,6 +1,6 @@
 # PicoTera 项目识别：待改动
 
-PicoTera 用正则从请求体里抓工作目录，按祖先路径匹配用户的项目，匹配不上且开了 `project.autoCreate` 就自动建项目（`pkg/server/project_extractor.go`）。这里记的是实际运行中踩到的问题和建议的四项改动；代码位置按 picotera `059b181`，示例路径都是虚构的。`axonhub-import` 的项目解析（`internal/axonimport/rules.go`、`project.go`）就是按这四项实现的，可作参考。
+PicoTera 用正则从请求体里抓工作目录，按祖先路径匹配用户的项目，匹配不上且开了 `project.autoCreate` 就自动建项目（`pkg/server/project_extractor.go`）。这里记的是实际运行中踩到的问题和建议的四项改动；代码位置按 picotera `059b181`，示例路径都是虚构的。`ptt` 的项目解析（`internal/axonimport/rules.go`、`project.go`）就是按这四项实现的，可作参考。
 
 ## 是怎么出问题的
 
@@ -80,6 +80,6 @@ Claude Code 在会话中途进出 worktree 时插入一段环境更新，同一�
 | 步骤 | 做法 |
 |---|---|
 | 找出受害项目 | 名字含 `)`、路径含 ` (was `、路径在 `.claude/worktrees/` 下、路径在黑名单里的项目 |
-| 重分类 | `axonhub-import reproject --project-id <id>`：从 request artifact 重新抽路径，先 dry-run 看去向，再 `--write`；它会一并挪 upstream 行、重算项目首末出现时间、刷新聚合 |
-| 合并碎片 | `axonhub-import merge-projects`：把 worktree 与别的机器上建出的碎项目并回仓库项目 |
+| 重分类 | `ptt reproject --project-id <id>`：从 request artifact 重新抽路径，先 dry-run 看去向，再 `--write`；它会一并挪 upstream 行、重算项目首末出现时间、刷新聚合 |
+| 合并碎片 | `ptt merge-projects`：把 worktree 与别的机器上建出的碎项目并回仓库项目 |
 | 追踪 | 追踪的项目是查询时取最新一条有项目的 meta 行，不用单独改 |

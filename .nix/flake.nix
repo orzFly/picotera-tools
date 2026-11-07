@@ -26,9 +26,9 @@
             ];
             commands = [
               {
-                name = "picotera-tools";
+                name = "ptt";
                 command = ''
-                  exec go run . "$@"
+                  exec go run ./cmd/ptt "$@"
                 '';
               }
             ];

@@ -1,8 +1,8 @@
-// Command axonhub-import copies AxonHub's request history into PicoTera's
-// request table and artifact bucket so old requests can be browsed there.
+// Command ptt is a toolbox for PicoTera: project maintenance on its own
+// database, and importing history from AxonHub.
 //
-// Without --write it only reads: the PicoTera connection is opened read-only
-// and no S3 client is created.
+// Without --write every command only reads: the PicoTera connection is
+// opened read-only and no S3 client is created.
 package main
 
 import (
@@ -25,26 +25,34 @@ import (
 	"github.com/orzfly/picotera-tools/internal/axonimport"
 )
 
-const usage = `usage: axonhub-import <command> [flags]
+const usage = `usage: ptt <command> [flags]
+
+commands:
+  reproject       re-resolve the project of rows in one PicoTera project from
+                  their request artifacts; dry-run unless --write
+  merge-projects  fold worktree and other-machine fragments into the
+                  repository's project; prints the plan unless --write
+  axonhub         import request history from AxonHub (ptt axonhub -h)
+
+environment:
+  PICOTERA_DATABASE_URL, and for artifacts PICOTERA_S3_ENDPOINT,
+  PICOTERA_S3_ACCESS_KEY, PICOTERA_S3_SECRET_KEY, PICOTERA_S3_BUCKET,
+  PICOTERA_S3_REGION, PICOTERA_S3_USE_SSL, PICOTERA_S3_PATH_STYLE
+`
+
+const axonhubUsage = `usage: ptt axonhub <command> [flags]
 
 commands:
   projects   report which PicoTera project each request would land in (read-only)
   import     map requests and dump them (default) or write them with --write
-  finalize   upsert traces, project first/last seen, refresh aggregates (needs --write)
-  reproject  re-resolve the project of rows in one PicoTera project from their
-             request artifacts; dry-run unless --write
   providers  create legacy providers for AxonHub channels per a channel map and
              set provider_id on imported rows; dry-run unless --write
   costs      copy AxonHub's recorded costs onto requests imported without them;
              dry-run unless --write
-  merge-projects
-             fold worktree and other-machine fragments into the repository's
-             project; prints the plan unless --write
+  finalize   upsert traces, project first/last seen, refresh aggregates (needs --write)
 
 environment:
-  AXONHUB_DB_DSN, PICOTERA_DATABASE_URL,
-  PICOTERA_S3_ENDPOINT, PICOTERA_S3_ACCESS_KEY, PICOTERA_S3_SECRET_KEY,
-  PICOTERA_S3_BUCKET, PICOTERA_S3_REGION, PICOTERA_S3_USE_SSL, PICOTERA_S3_PATH_STYLE
+  AXONHUB_DB_DSN, plus everything ptt itself reads
 `
 
 func main() {
@@ -57,20 +65,12 @@ func main() {
 
 	var err error
 	switch os.Args[1] {
-	case "projects":
-		err = cmdProjects(ctx, os.Args[2:])
-	case "import":
-		err = cmdImport(ctx, os.Args[2:])
-	case "finalize":
-		err = cmdFinalize(ctx, os.Args[2:])
 	case "reproject":
 		err = cmdReproject(ctx, os.Args[2:])
-	case "providers":
-		err = cmdProviders(ctx, os.Args[2:])
-	case "costs":
-		err = cmdCosts(ctx, os.Args[2:])
 	case "merge-projects":
 		err = cmdMergeProjects(ctx, os.Args[2:])
+	case "axonhub":
+		err = cmdAxonHub(ctx, os.Args[2:])
 	default:
 		fmt.Fprint(os.Stderr, usage)
 		os.Exit(2)
@@ -78,6 +78,28 @@ func main() {
 	if err != nil {
 		log.Fatal(err)
 	}
+}
+
+func cmdAxonHub(ctx context.Context, args []string) error {
+	if len(args) < 1 {
+		fmt.Fprint(os.Stderr, axonhubUsage)
+		os.Exit(2)
+	}
+	switch args[0] {
+	case "projects":
+		return cmdProjects(ctx, args[1:])
+	case "import":
+		return cmdImport(ctx, args[1:])
+	case "providers":
+		return cmdProviders(ctx, args[1:])
+	case "costs":
+		return cmdCosts(ctx, args[1:])
+	case "finalize":
+		return cmdFinalize(ctx, args[1:])
+	}
+	fmt.Fprint(os.Stderr, axonhubUsage)
+	os.Exit(2)
+	return nil
 }
 
 type common struct {
@@ -179,7 +201,7 @@ func (c *common) applyAssign(p *axonimport.Projects) {
 }
 
 func cmdProjects(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("projects", flag.ExitOnError)
+	fs := flag.NewFlagSet("ptt axonhub projects", flag.ExitOnError)
 	var c common
 	c.register(fs)
 	sampleMod := fs.Int64("sample-mod", 0, "only requests whose id is divisible by this")
@@ -215,7 +237,7 @@ func cmdProjects(ctx context.Context, args []string) error {
 }
 
 func cmdImport(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("import", flag.ExitOnError)
+	fs := flag.NewFlagSet("ptt axonhub import", flag.ExitOnError)
 	var c common
 	c.register(fs)
 	limit := fs.Int64("limit", 0, "stop after this many requests (0 = no limit)")
@@ -356,7 +378,7 @@ func cmdImport(ctx context.Context, args []string) error {
 }
 
 func cmdFinalize(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("finalize", flag.ExitOnError)
+	fs := flag.NewFlagSet("ptt axonhub finalize", flag.ExitOnError)
 	userID := fs.Int64("user-id", 1, "PicoTera user that owns the imported rows")
 	since := fs.String("since", "2026-02-01", "refresh continuous aggregates from this date")
 	write := fs.Bool("write", false, "required: finalize writes to the live PicoTera database")
@@ -377,13 +399,13 @@ func cmdFinalize(ctx context.Context, args []string) error {
 }
 
 func cmdReproject(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("reproject", flag.ExitOnError)
+	fs := flag.NewFlagSet("ptt reproject", flag.ExitOnError)
 	userID := fs.Int64("user-id", 1, "PicoTera user that owns the rows")
 	projectID := fs.Int("project-id", 0, "project whose rows are re-resolved (required)")
 	batch := fs.Int("batch", 200, "meta rows per page")
 	workers := fs.Int("workers", 16, "concurrent artifact fetches")
 	write := fs.Bool("write", false, "create projects and move rows in the live PicoTera database")
-	rulesPath := fs.String("rules", "", "JSON rules file (see import -rules)")
+	rulesPath := fs.String("rules", "", "JSON rules file with mainRoot, aliases, blacklist and roots (see README)")
 	_ = fs.Parse(args)
 	if *projectID <= 0 {
 		return errors.New("--project-id is required")
@@ -443,7 +465,7 @@ func providerIDs(byName map[string]int64) map[string]int32 {
 }
 
 func cmdProviders(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("providers", flag.ExitOnError)
+	fs := flag.NewFlagSet("ptt axonhub providers", flag.ExitOnError)
 	channelMap := fs.String("channel-map", "", "file of '<channel id> id <provider id>' / '<channel id> new <name>' lines (required)")
 	batch := fs.Int("batch", 1000, "rows per round trip")
 	write := fs.Bool("write", false, "create providers and update rows in the live PicoTera database")
@@ -502,7 +524,7 @@ func cmdProviders(ctx context.Context, args []string) error {
 }
 
 func cmdCosts(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("costs", flag.ExitOnError)
+	fs := flag.NewFlagSet("ptt axonhub costs", flag.ExitOnError)
 	afterID := fs.Int64("after-id", 0, "start after this AxonHub request id")
 	untilID := fs.Int64("until-id", 0, "stop at this AxonHub request id, inclusive (0 = current max)")
 	batch := fs.Int("batch", 500, "requests per round trip")
@@ -538,10 +560,10 @@ func cmdCosts(ctx context.Context, args []string) error {
 }
 
 func cmdMergeProjects(ctx context.Context, args []string) error {
-	fs := flag.NewFlagSet("merge-projects", flag.ExitOnError)
+	fs := flag.NewFlagSet("ptt merge-projects", flag.ExitOnError)
 	userID := fs.Int64("user-id", 1, "PicoTera user whose projects are merged")
 	write := fs.Bool("write", false, "apply the plan; merges cannot be undone")
-	rulesPath := fs.String("rules", "", "JSON rules file (see import -rules)")
+	rulesPath := fs.String("rules", "", "JSON rules file with mainRoot, aliases, blacklist and roots (see README)")
 	_ = fs.Parse(args)
 	rules, err := axonimport.LoadRules(*rulesPath)
 	if err != nil {

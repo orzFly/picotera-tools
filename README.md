@@ -2,28 +2,28 @@
 
 Tools around [PicoTera](https://git.atto.town/oott123/picotera), an LLM gateway. PicoTera's Go module path is the bare `picotera`, so the formats it writes are mirrored in `internal/picotera` (see `doc.go` there for the source commit and license).
 
-## axonhub-import
+## ptt
 
-Moves request history from [AxonHub](https://github.com/looplj/axonhub) (Postgres) into PicoTera's `request` table and artifact bucket, so old requests can be browsed, filtered and costed next to new ones.
+`ptt` is the command-line tool. Project maintenance works on any PicoTera; the `axonhub` commands move request history from [AxonHub](https://github.com/looplj/axonhub) (Postgres) into PicoTera's `request` table and artifact bucket, so old requests can be browsed, filtered and costed next to new ones.
 
 | Command | Writes | What |
 |---|---|---|
-| `projects` | nothing | Which project each request would land in; which projects auto-creation would add |
-| `import` | nothing, or `--dump DIR` locally | Maps requests and counts rows and artifact bytes; `--dump` writes decompressed artifacts and `rows.jsonl`; `--report FILE` writes the project report |
-| `import --write` | PicoTera DB and bucket | The import. Re-runnable; `--incremental` continues after the last imported request; ends with `finalize` |
-| `providers` | with `--write`: providers, `provider_id` | Creates PicoTera providers for AxonHub channels per a channel map and labels imported rows |
-| `costs` | with `--write`: `model_cost` | Copies AxonHub's recorded costs onto imported rows |
-| `finalize --write` | PicoTera DB | Upserts `traces`, project first/last seen, refreshes continuous aggregates |
-| `reproject` | with `--write`: projects, `project_id` | Re-resolves the project of every row in one project from its request artifacts |
-| `merge-projects` | with `--write`: projects | Folds worktree and other-machine fragments into the repository's project |
+| `ptt reproject` | with `--write`: projects, `project_id` | Re-resolves the project of every row in one project from its request artifacts |
+| `ptt merge-projects` | with `--write`: projects | Folds worktree and other-machine fragments into the repository's project |
+| `ptt axonhub projects` | nothing | Which project each AxonHub request would land in; which projects auto-creation would add |
+| `ptt axonhub import` | nothing, or `--dump DIR` locally | Maps requests and counts rows and artifact bytes; `--dump` writes decompressed artifacts and `rows.jsonl`; `--report FILE` writes the project report |
+| `ptt axonhub import --write` | PicoTera DB and bucket | The import. Re-runnable; `--incremental` continues after the last imported request; ends with `finalize` |
+| `ptt axonhub providers` | with `--write`: providers, `provider_id` | Creates PicoTera providers for AxonHub channels per a channel map and labels imported rows |
+| `ptt axonhub costs` | with `--write`: `model_cost` | Copies AxonHub's recorded costs onto imported rows |
+| `ptt axonhub finalize --write` | PicoTera DB | Upserts `traces`, project first/last seen, refreshes continuous aggregates |
 
 Without `--write` the PicoTera connection runs with `default_transaction_read_only=on` and no S3 client exists. The AxonHub connection is always read-only.
 
 ### Environment
 
-`AXONHUB_DB_DSN`, `PICOTERA_DATABASE_URL`, and for artifacts `PICOTERA_S3_ENDPOINT`, `PICOTERA_S3_ACCESS_KEY`, `PICOTERA_S3_SECRET_KEY`, `PICOTERA_S3_BUCKET`, `PICOTERA_S3_REGION`, `PICOTERA_S3_USE_SSL`, `PICOTERA_S3_PATH_STYLE`: the same names PicoTera itself reads.
+`PICOTERA_DATABASE_URL`, `AXONHUB_DB_DSN` for the `axonhub` commands, and for artifacts `PICOTERA_S3_ENDPOINT`, `PICOTERA_S3_ACCESS_KEY`, `PICOTERA_S3_SECRET_KEY`, `PICOTERA_S3_BUCKET`, `PICOTERA_S3_REGION`, `PICOTERA_S3_USE_SSL`, `PICOTERA_S3_PATH_STYLE`: the same names PicoTera itself reads.
 
-### Mapping
+### AxonHub mapping
 
 | PicoTera | AxonHub |
 |---|---|
@@ -65,7 +65,7 @@ One-off routing goes on the command line: `--assign PATH=PROJECT_ID` (repeatable
 
 ### Channel map
 
-`providers` and `import --channel-map` read one line per AxonHub channel:
+`ptt axonhub providers` and `ptt axonhub import --channel-map` read one line per AxonHub channel:
 
 ```
 # <channel id> id <existing provider id>
@@ -78,13 +78,13 @@ New providers are created disabled, at priority -100, with placeholder credentia
 
 ### Running
 
-AxonHub and PicoTera usually sit on a container network with their databases. Build a static binary and run it in a throwaway container on that network, with the services' own env files:
+PicoTera (and AxonHub) usually sit on a container network with their databases. Build a static binary and run it in a throwaway container on that network, with the services' own env files:
 
 ```sh
 CGO_ENABLED=0 go build -trimpath -o bin/ ./cmd/...
 podman run --rm --network <network> \
   --env-file <axonhub env file> --env-file <picotera env file> \
-  -v "$PWD/bin:/w" --entrypoint /w/axonhub-import <any image> projects
+  -v "$PWD/bin:/w" --entrypoint /w/ptt <any image> axonhub projects
 ```
 
 Keep rules files, channel maps and `--assign` / `--key-map` choices next to the binary on the host: they describe a deployment, not this tool.
