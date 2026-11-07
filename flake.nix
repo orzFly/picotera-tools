@@ -25,7 +25,7 @@
             pname = name;
             inherit version src;
             subPackages = [ "cmd/${name}" ];
-            vendorHash = "sha256-WUqtimWESoDYzp8Ct7hMACWeLvxFmCqZ6UgrYnzdnJs=";
+            vendorHash = "sha256-9vQ0gBcDZhfSVCfKz0ydinkfYMYpyCErbDTZUDgtFdc=";
             env.CGO_ENABLED = 0;
             ldflags = [ "-s" "-w" ];
             meta.mainProgram = name;
