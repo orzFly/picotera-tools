@@ -85,6 +85,25 @@ func (f *fallback) expireLoop(every time.Duration) {
 
 // lookup returns nil, nil when the key is not archived either, so the caller can pass MinIO's 404 on.
 func (f *fallback) lookup(ctx context.Context, key string) (*cachedEntry, error) {
+	e, err := f.lookupOnce(ctx, key)
+	if errors.Is(err, errNotFound) {
+		// The generation this process cached was replaced and removed since: forget the day and
+		// look again from a fresh CURRENT.
+		if day, ok := dayOfKey(key); ok {
+			f.forget(day)
+			return f.lookupOnce(ctx, key)
+		}
+	}
+	return e, err
+}
+
+func (f *fallback) forget(day string) {
+	f.mu.Lock()
+	delete(f.current, day)
+	f.mu.Unlock()
+}
+
+func (f *fallback) lookupOnce(ctx context.Context, key string) (*cachedEntry, error) {
 	if e, ok := f.entries.get(key); ok {
 		return e, nil
 	}

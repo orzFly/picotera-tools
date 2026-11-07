@@ -41,6 +41,9 @@ func TestConvertV1ToV2(t *testing.T) {
 	if ix.Version != indexV2 {
 		t.Fatal("still v1")
 	}
+	if st.has(testArch, dataKey(testDay, v1gen)) || st.has(testArch, indexKey(testDay, v1gen)) {
+		t.Fatal("the v1 generation outlived its conversion")
+	}
 	for k, b := range want {
 		if !bytes.Equal(get(k), b) {
 			t.Fatalf("%s differs after conversion", k)

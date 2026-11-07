@@ -47,18 +47,18 @@ type dayStatus struct {
 	Ratio        float64  `json:"ratio"`
 	Skipped      []string `json:"skipped,omitempty"`
 	Deleted      int      `json:"deleted"`
+	Removed      []string `json:"removed_generations,omitempty"`
 	UpToDate     bool     `json:"up_to_date,omitempty"`
 	Seconds      float64  `json:"seconds"`
 	Error        string   `json:"error,omitempty"`
 }
 
 type runStatus struct {
-	Started            time.Time   `json:"started"`
-	Finished           time.Time   `json:"finished"`
-	Delete             bool        `json:"delete"`
-	Days               []dayStatus `json:"days"`
-	RemovedGenerations []string    `json:"removed_generations,omitempty"`
-	Error              string      `json:"error,omitempty"`
+	Started  time.Time   `json:"started"`
+	Finished time.Time   `json:"finished"`
+	Delete   bool        `json:"delete"`
+	Days     []dayStatus `json:"days"`
+	Error    string      `json:"error,omitempty"`
 }
 
 const statusKey = "_status.json"
@@ -72,7 +72,6 @@ func (a *archiver) run(ctx context.Context) error {
 		return err
 	}
 	var failed []string
-	switched := map[string]bool{}
 	// Readers re-read CURRENT when the generation they cached misses a key, so a day's loose
 	// objects can go as soon as its CURRENT is in place, and space comes back as the run goes.
 	deleteDay := func(i int) {
@@ -117,7 +116,6 @@ func (a *archiver) run(ctx context.Context) error {
 				a.log.Error("day failed", "day", d, "err", ds.Error)
 				continue
 			}
-			switched[d] = true
 			a.log.Info("archived", "day", d, "entries", ds.Entries, "ratio", fmt.Sprintf("%.1f", ds.Ratio), "seconds", int(ds.Seconds))
 			if a.del {
 				deleteDay(len(rs.Days) - 1)
@@ -126,13 +124,6 @@ func (a *archiver) run(ctx context.Context) error {
 	}
 	if a.dryRun {
 		return nil
-	}
-	if a.del {
-		removed, err := a.removeOldGenerations(ctx, gen, switched)
-		rs.RemovedGenerations = removed
-		if err != nil {
-			rs.Error = err.Error()
-		}
 	}
 	rs.Finished = a.now().UTC()
 	b, _ := json.MarshalIndent(rs, "", "  ")
@@ -360,6 +351,9 @@ func (a *archiver) archiveDay(ctx context.Context, day, gen string, loose []obje
 	if err := a.st.Put(ctx, a.archBucket, currentKey(day), strings.NewReader(gen+"\n"), int64(len(gen)+1), "text/plain"); err != nil {
 		return abort(err)
 	}
+	if ds.Removed, err = dropOtherGenerations(ctx, a.st, a.archBucket, day, gen); err != nil {
+		a.log.Warn("could not remove older generations", "day", day, "err", err)
+	}
 	ds.Entries = len(ix.Entries)
 	for _, f := range ix.Frames {
 		ds.ArchiveBytes += f.Length
@@ -508,48 +502,25 @@ func (a *archiver) verify(ctx context.Context, day, gen string, ix *archiveIndex
 	return nil
 }
 
-// removeOldGenerations drops every generation that is neither CURRENT nor this run's own.
-// A day switched by this run keeps its previous generation until the next run, for readers
-// that still hold the old CURRENT.
-func (a *archiver) removeOldGenerations(ctx context.Context, runGen string, switched map[string]bool) ([]string, error) {
-	objs, err := a.st.List(ctx, a.archBucket, "")
+// dropOtherGenerations removes every generation of day in bucket but keep. It runs right after
+// keep became CURRENT and lists only that day, so no run ever has to sweep the whole bucket;
+// readers still holding an older CURRENT re-read it when its objects are gone.
+func dropOtherGenerations(ctx context.Context, st store, bucket, day, keep string) ([]string, error) {
+	objs, err := st.List(ctx, bucket, day+"/")
 	if err != nil {
 		return nil, err
 	}
-	byDay := map[string][]string{}
+	var drop []string
 	for _, o := range objs {
-		day, name, ok := strings.Cut(o.Key, "/")
-		if !ok || name == "CURRENT" || !(strings.HasSuffix(name, ".data") || strings.HasSuffix(name, ".index")) {
-			continue
+		name := strings.TrimPrefix(o.Key, day+"/")
+		if (strings.HasSuffix(name, ".data") || strings.HasSuffix(name, ".index")) && generationOf(name) != keep {
+			drop = append(drop, o.Key)
 		}
-		byDay[day] = append(byDay[day], o.Key)
 	}
-	var removed []string
-	for day, keys := range byDay {
-		if switched[day] {
-			continue
-		}
-		cur, err := readCurrent(ctx, a.st, a.archBucket, day)
-		if err != nil {
-			return removed, err
-		}
-		var drop []string
-		for _, k := range keys {
-			g := generationOf(strings.TrimPrefix(k, day+"/"))
-			if g != cur && g < runGen && cur != "" {
-				drop = append(drop, k)
-			}
-		}
-		if len(drop) == 0 {
-			continue
-		}
-		if err := a.st.Remove(ctx, a.archBucket, drop); err != nil {
-			return removed, err
-		}
-		removed = append(removed, drop...)
+	if len(drop) == 0 {
+		return nil, nil
 	}
-	sort.Strings(removed)
-	return removed, nil
+	return drop, st.Remove(ctx, bucket, drop)
 }
 
 // oldReader walks the previous generation front to back; a repack asks for its entries in key

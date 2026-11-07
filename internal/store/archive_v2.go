@@ -275,6 +275,9 @@ func (a *archiver) archiveDayV2(ctx context.Context, day, gen string, loose []ob
 	if err := a.st.Put(ctx, a.archBucket, currentKey(day), strings.NewReader(gen+"\n"), int64(len(gen)+1), "text/plain"); err != nil {
 		return fail(err)
 	}
+	if ds.Removed, err = dropOtherGenerations(ctx, a.st, a.archBucket, day, gen); err != nil {
+		a.log.Warn("could not remove older generations", "day", day, "err", err)
+	}
 	ds.Entries = len(ix.Entries)
 	for _, f := range ix.Frames {
 		ds.ArchiveBytes += f.Length

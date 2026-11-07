@@ -189,10 +189,10 @@ PicoTera stores every request and response as its own zstd object, `artifacts/<U
 
 | Command | What it does |
 |---|---|
-| `pt-store archive` | Packs each day up to `--min-age-days` (2) old into `<archive bucket>/<day>/`, checks every entry back against its source, then moves the day's `CURRENT` to it. With `--delete` it then, day by day as it goes, removes the loose objects that `CURRENT` holds with the same key and ETag; anything written or overwritten since is left for the next run. A day already packed is skipped; one that gained objects is packed again whole. |
+| `pt-store archive` | Packs each day up to `--min-age-days` (2) old into `<archive bucket>/<day>/`, checks every entry back against its source, then moves the day's `CURRENT` to it and removes the day's earlier generation. With `--delete` it then, day by day as it goes, removes the loose objects that `CURRENT` holds with the same key and ETag; anything written or overwritten since is left for the next run. A day already packed is skipped; one that gained objects is packed again whole. |
 | `pt-store serve` | Sits between the dashboard and S3 for presigned artifact reads. It forwards them unchanged and, where S3 answers `NoSuchKey`, serves the entry from the archive. |
 | `pt-store get` | Prints one archived artifact, decompressed. |
-| `pt-store convert` | Rewrites archived days from format v1 to v2. It holds a whole day in memory, so run it on a machine with room for one; `--out-bucket` writes a trial copy elsewhere. |
+| `pt-store convert` | Rewrites archived days from format v1 to v2, removing the v1 generation once the v2 one is checked and current. It holds a whole day in memory, so run it on a machine with room for one; `--out-bucket` writes a trial copy elsewhere. |
 
 They read the same `PICOTERA_S3_*` variables as PicoTera; `--endpoint`, `--bucket` and the rest override them, and `--archive-bucket` is required. The key needs read and write on both buckets.
 
@@ -213,7 +213,7 @@ The dashboard opens an artifact through a presigned URL. Point PicoTera's `PICOT
 
 `serve` lets through only `GET` and `HEAD` of `/<bucket>/artifacts/<day>/<file>` and refuses anything else itself, so the route to it can skip the dashboard's login without exposing the rest of S3. It falls back to the archive only on `NoSuchKey`, which S3 returns only after the signature checked out (MinIO names it in `X-Minio-Error-Code` for `HEAD` and in the XML body for `GET`); every other error passes through.
 
-A `serve` that cached a day's `CURRENT` (for a minute) from before a run moved it re-reads it when the cached generation misses a key, so loose objects can be deleted the moment `CURRENT` moves. Reads from the archive are cached in memory, including the entries next to the one asked for, since the dashboard tends to open neighbouring requests; the caches drop what has been idle for a minute. Where PicoTera uses a remote S3 that bills for traffic, `--disk-cache DIR` (with `--disk-cache-size`, 1 GiB by default) also keeps what was read from the archive bucket on local disk; only immutable objects are cached, so nothing there goes stale.
+A `serve` that cached a day's `CURRENT` (for a minute) from before a run moved it re-reads it when the cached generation misses a key or its objects are gone, so loose objects and old generations can be deleted the moment `CURRENT` moves. No run ever lists or reads days it has nothing to do for, which matters on an S3 that bills per request. Reads from the archive are cached in memory, including the entries next to the one asked for, since the dashboard tends to open neighbouring requests; the caches drop what has been idle for a minute. Where PicoTera uses a remote S3 that bills for traffic, `--disk-cache DIR` (with `--disk-cache-size`, 1 GiB by default) also keeps what was read from the archive bucket on local disk; only immutable objects are cached, so nothing there goes stale.
 
 ```sh
 pt-store serve --listen :9910 --upstream https://dashboard.example.com --archive-bucket picotera-archives

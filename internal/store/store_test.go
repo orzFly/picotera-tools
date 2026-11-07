@@ -187,6 +187,13 @@ func TestArchiveAndRepack(t *testing.T) {
 	want[added] = []byte(`{"late":true}`)
 	st.Put(ctx, testBucket, added, bytes.NewReader(zstdObject(t, want[added])), -1, "application/json")
 
+	// A reader that cached CURRENT and the index of the first generation, and caches no
+	// entries or frames, so it has to go back to the removed generation's objects.
+	stale := newFallback(st, testArch, 2, 0, 0, 0, 0, 0, quiet)
+	if e, err := stale.lookup(ctx, "artifacts/"+testDay+"/id0000.request.json.zst"); err != nil || e == nil {
+		t.Fatalf("stale reader before the repack: %v", err)
+	}
+
 	a.now = func() time.Time { return time.Date(2026, 1, 17, 4, 0, 0, 0, time.UTC) }
 	if err := a.run(ctx); err != nil {
 		t.Fatal(err)
@@ -195,8 +202,18 @@ func TestArchiveAndRepack(t *testing.T) {
 	if gen2 == gen1 {
 		t.Fatal("CURRENT did not move")
 	}
-	if !st.has(testArch, dataKey(testDay, gen1)) {
-		t.Fatal("the previous generation went in the same run that replaced it")
+	if st.has(testArch, dataKey(testDay, gen1)) || st.has(testArch, indexKey(testDay, gen1)) {
+		t.Fatal("the replaced generation outlived the repack")
+	}
+	if !st.has(testArch, dataKey(testDay, gen2)) {
+		t.Fatal("current generation removed")
+	}
+	e, err := stale.lookup(ctx, "artifacts/"+testDay+"/id0001.request.json.zst")
+	if err != nil || e == nil {
+		t.Fatalf("a reader holding the removed generation did not recover: %v", err)
+	}
+	if raw, _ := decodeHTTPBody(e.body); !bytes.Equal(raw, want["artifacts/"+testDay+"/id0001.request.json.zst"]) {
+		t.Fatal("wrong bytes after recovering")
 	}
 	fb = newFallback(st, testArch, 2, 1<<30, 1<<30, 1<<30, 1<<30, 0, quiet)
 	for k, body := range want {
@@ -207,18 +224,6 @@ func TestArchiveAndRepack(t *testing.T) {
 		if raw, _ := decodeHTTPBody(e.body); !bytes.Equal(raw, body) {
 			t.Fatalf("%s: repack lost the newer object", k)
 		}
-	}
-
-	// The next run, with nothing loose, retires the old generation.
-	a.now = func() time.Time { return time.Date(2026, 1, 18, 4, 0, 0, 0, time.UTC) }
-	if err := a.run(ctx); err != nil {
-		t.Fatal(err)
-	}
-	if st.has(testArch, dataKey(testDay, gen1)) || st.has(testArch, indexKey(testDay, gen1)) {
-		t.Fatal("old generation survived the next run")
-	}
-	if !st.has(testArch, dataKey(testDay, gen2)) {
-		t.Fatal("current generation removed")
 	}
 }
 
