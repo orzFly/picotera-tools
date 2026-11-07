@@ -13,8 +13,9 @@ import (
 )
 
 // convertDay rewrites the v1 generation of day as v2. The v1 frames are 1 GiB each and would
-// have to be read in v2's sorted order, so the whole day is decoded into memory first: run it
-// where there is room for a day's raw artifacts. In place, days that still have loose objects
+// have to be read in v2's sorted order, so the whole day is read into memory first, each entry
+// compressed on its own: about the size of the day's original objects, 20-odd GiB for the
+// largest days so far. Run it where there is room for that. In place, days that still have loose objects
 // are left to the daily archive run, which owns their CURRENT; a trial into another bucket is not.
 func convertDay(ctx context.Context, st store, bucket, archBucket, outBucket, day string, now func() time.Time, log *slog.Logger) (dayStatus, error) {
 	cur, err := readCurrent(ctx, st, archBucket, day)
@@ -46,6 +47,11 @@ func convertDay(ctx context.Context, st store, bucket, archBucket, outBucket, da
 
 	t0 := time.Now()
 	mem := make(map[string]memEntry, len(ix.Entries))
+	enc, err := zstd.NewWriter(nil, zstd.WithEncoderLevel(zstd.SpeedFastest))
+	if err != nil {
+		return dayStatus{}, err
+	}
+	defer enc.Close()
 	entries := make([]objectInfo, 0, len(ix.Entries))
 	dec, err := newFrameDecoder(ix.WindowLog)
 	if err != nil {
@@ -63,7 +69,7 @@ func convertDay(ctx context.Context, st store, bucket, archBucket, outBucket, da
 				return false, err
 			}
 			info := objectInfo{Key: e.Key, Size: e.StoredSize, ContentType: e.ContentType, ETag: e.ETag}
-			mem[e.Key] = memEntry{raw: raw, info: info}
+			mem[e.Key] = memEntry{comp: enc.EncodeAll(raw, nil), info: info}
 			entries = append(entries, info)
 			return true, nil
 		})

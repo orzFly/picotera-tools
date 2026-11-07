@@ -30,8 +30,8 @@ type archiver struct {
 	format     string // "v1" or "v2"
 	textFrame  int64  // v2 frame sizes; zero means v2TextFrame and v2BlobFrame
 	blobFrame  int64
-	// mem, when set, holds the decompressed entries convert read out of a v1 generation; they
-	// stand in for loose objects.
+	// mem, when set, holds the entries convert read out of a v1 generation, each zstd-compressed
+	// on its own; they stand in for loose objects.
 	mem map[string]memEntry
 	// picotera-s3proxy caches CURRENT for currentTTL; loose objects outlive the switch by twice
 	// that, so a reader still holding the old generation finds the key one way or the other.
@@ -452,7 +452,7 @@ func (a *archiver) prefetch(ctx context.Context, items []mergeItem) <-chan chan 
 }
 
 type memEntry struct {
-	raw  []byte
+	comp []byte
 	info objectInfo
 }
 
@@ -462,7 +462,11 @@ func (a *archiver) fetchLoose(ctx context.Context, dec *zstd.Decoder, key string
 		if !ok {
 			return fetched{key: key, bad: errNotFound}
 		}
-		return fetched{key: key, raw: m.raw, ct: m.info.ContentType, etag: m.info.ETag, size: m.info.Size}
+		raw, err := dec.DecodeAll(m.comp, nil)
+		if err != nil {
+			return fetched{key: key, err: fmt.Errorf("%s: %w", key, err)}
+		}
+		return fetched{key: key, raw: raw, ct: m.info.ContentType, etag: m.info.ETag, size: m.info.Size}
 	}
 	rc, info, err := a.st.Get(ctx, a.bucket, key)
 	if errors.Is(err, errNotFound) {
